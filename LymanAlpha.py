@@ -233,3 +233,33 @@ st.plotly_chart(
     fig2,
     width="stretch"
 )
+
+
+
+
+
+
+
+
+
+st.header("DEBUG")
+
+st.write("Flux dtype:", flux.dtype)
+st.write("Error dtype:", error.dtype)
+
+for i in range(10):
+    st.write(
+        i,
+        repr(flux[i]),
+        repr(error[i])
+    )
+
+st.write(
+    "Finite flux values:",
+    np.sum(np.isfinite(flux))
+)
+
+st.write(
+    "Finite error values:",
+    np.sum(np.isfinite(error))
+)
