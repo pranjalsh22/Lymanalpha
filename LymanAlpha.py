@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Lyα Forest Explorer v2", layout="wide")
 
-DEFAULT_FLUX = "J0011+1446_HIRES_flux(2).fits"
-DEFAULT_ERROR = "J0011+1446_HIRES_error(2).fits"
+DEFAULT_FLUX = "J0011+1446_HIRES_flux.fits"
+DEFAULT_ERROR = "J0011+1446_HIRES_error.fits"
 
 def load_fits(source):
     with fits.open(source) as hdul:
