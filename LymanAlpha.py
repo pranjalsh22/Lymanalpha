@@ -1,7 +1,4 @@
 
-# Lyα Forest Explorer - Complete Research App
-# Save as app.py
-
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -13,99 +10,126 @@ st.set_page_config(page_title="Lyα Forest Explorer", layout="wide")
 def read_fits(uploaded_file):
     uploaded_file.seek(0)
     with fits.open(uploaded_file) as hdul:
-        for hdu in hdul:
-            if hdu.data is not None:
-                return np.asarray(hdu.data).squeeze(), hdu.header
-    raise ValueError("No data found in FITS file")
+        hdu_info = []
+        data = None
+        header = None
+        for i, hdu in enumerate(hdul):
+            shape = None if hdu.data is None else str(np.shape(hdu.data))
+            hdu_info.append({"HDU": i, "Name": hdu.name, "Shape": shape})
+            if data is None and hdu.data is not None:
+                data = np.asarray(hdu.data).squeeze()
+                header = hdu.header
+    if data is None:
+        raise ValueError("No data found in FITS file")
+    return data, header, pd.DataFrame(hdu_info)
 
 def wavelength_array(header, npix):
-    crval1 = header["CRVAL1"]
-    cdelt1 = header["CDELT1"]
-    pix = np.arange(npix)
-    return 10 ** (crval1 + pix * cdelt1)
+    return 10 ** (header["CRVAL1"] + np.arange(npix)*header["CDELT1"])
 
 st.title("🌌 Lyα Forest Explorer")
+st.markdown("Upload flux and error FITS files and follow the complete Lyα forest workflow.")
 
-flux_file = st.sidebar.file_uploader("Flux FITS", type=["fits"])
-error_file = st.sidebar.file_uploader("Error FITS", type=["fits"])
+flux_file = st.file_uploader("Flux FITS", type=["fits"])
+error_file = st.file_uploader("Error FITS", type=["fits"])
 
-if flux_file is None or error_file is None:
-    st.info("Upload both FITS files.")
+if not (flux_file and error_file):
     st.stop()
 
-flux, header = read_fits(flux_file)
-error, _ = read_fits(error_file)
+flux, header, hdu_df = read_fits(flux_file)
+error, _, _ = read_fits(error_file)
 
 n = min(len(flux), len(error))
 flux, error = flux[:n], error[:n]
 
 wave = wavelength_array(header, n)
-snr = np.where(error > 0, flux / error, np.nan)
+snr = np.where(error > 0, flux/error, np.nan)
 
-page = st.sidebar.selectbox(
-    "Page",
-    ["Overview","Data Preview","Spectrum","SNR","LyA Forest","Redshift","Header","Formulas"]
-)
+st.header("1. FITS Structure")
+st.dataframe(hdu_df, use_container_width=True)
 
-if page == "Overview":
-    st.header("Overview")
-    c1,c2,c3 = st.columns(3)
-    c1.metric("Pixels", len(flux))
-    c2.metric("λ min", f"{wave.min():.1f} Å")
-    c3.metric("λ max", f"{wave.max():.1f} Å")
+st.header("2. Data Preview")
+df = pd.DataFrame({
+    "Pixel": np.arange(n),
+    "Wavelength (Å)": wave,
+    "Flux": flux,
+    "Error": error,
+    "SNR": snr
+})
+st.dataframe(df.head(500), use_container_width=True)
 
-    st.subheader("Statistics")
-    st.write(pd.DataFrame({
-        "Statistic":["Mean Flux","Median Flux","Std Flux","Median SNR"],
-        "Value":[np.nanmean(flux),np.nanmedian(flux),np.nanstd(flux),np.nanmedian(snr)]
-    }))
+st.header("3. Wavelength Calibration")
+st.latex(r"\lambda_i = 10^{CRVAL1 + i\,CDELT1}")
+st.write(f"CRVAL1 = {header.get('CRVAL1')}")
+st.write(f"CDELT1 = {header.get('CDELT1')}")
 
-elif page == "Data Preview":
-    df = pd.DataFrame({
-        "Pixel": np.arange(len(flux)),
-        "Wavelength": wave,
-        "Flux": flux,
-        "Error": error,
-        "SNR": snr
-    })
-    st.dataframe(df.head(1000), use_container_width=True)
+st.header("4. Constant Velocity Binning")
+st.latex(r"\Delta v = c\ln(10)\,CDELT1")
+dv = 299792.458*np.log(10)*header["CDELT1"]
+st.metric("Velocity Bin (km/s)", f"{dv:.3f}")
 
-elif page == "Spectrum":
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=wave,y=flux,name="Flux"))
-    fig.add_trace(go.Scatter(x=wave,y=error,name="Error"))
-    st.plotly_chart(fig, use_container_width=True)
+st.header("5. Spectrum")
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=wave,y=flux,name="Flux"))
+fig.add_trace(go.Scatter(x=wave,y=error,name="Error"))
+st.plotly_chart(fig, use_container_width=True)
 
-elif page == "SNR":
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=wave,y=snr,name="SNR"))
-    st.plotly_chart(fig, use_container_width=True)
+st.header("6. Signal-to-Noise")
+st.latex(r"S/N = \frac{F}{\sigma}")
+st.metric("Median SNR", f"{np.nanmedian(snr):.2f}")
+fig2 = go.Figure()
+fig2.add_trace(go.Scatter(x=wave,y=snr,name="SNR"))
+st.plotly_chart(fig2, use_container_width=True)
 
-elif page == "LyA Forest":
-    z = st.number_input("Quasar Redshift", value=5.0)
-    lya = 1215.67*(1+z)
-    lyb = 1025.72*(1+z)
+st.header("7. Lyα Forest Identification")
+z = st.number_input("Quasar Redshift", value=5.0, step=0.01)
+st.latex(r"\lambda_{\alpha}=1215.67(1+z_{QSO})")
+st.latex(r"\lambda_{\beta}=1025.72(1+z_{QSO})")
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=wave,y=flux,name="Flux"))
-    fig.add_vline(x=lya)
-    fig.add_vline(x=lyb)
-    st.plotly_chart(fig, use_container_width=True)
+lya = 1215.67*(1+z)
+lyb = 1025.72*(1+z)
+forest_start = 1040*(1+z)
+forest_end = 1180*(1+z)
 
-elif page == "Redshift":
-    zabs = wave/1215.67 - 1
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=wave,y=zabs))
-    st.plotly_chart(fig, use_container_width=True)
+fig3 = go.Figure()
+fig3.add_trace(go.Scatter(x=wave,y=flux,name="Flux"))
+fig3.add_vline(x=lya)
+fig3.add_vline(x=lyb)
+fig3.add_vrect(x0=forest_start,x1=forest_end,opacity=0.2)
+st.plotly_chart(fig3, use_container_width=True)
 
-elif page == "Header":
-    st.json(dict(header))
+st.header("8. Forest Region Formula")
+st.latex(r"1040\AA < \lambda_{rest} < 1180\AA")
+st.latex(r"\lambda_{obs}=\lambda_{rest}(1+z_{QSO})")
 
-elif page == "Formulas":
-    st.latex(r"\lambda_i = 10^{CRVAL1+iCDELT1}")
-    st.latex(r"\Delta v = c\ln(10)CDELT1")
-    st.latex(r"S/N = F/\sigma")
-    st.latex(r"z_{abs}=\lambda_{obs}/1215.67 -1")
-    st.latex(r"\lambda_{\alpha}=1215.67(1+z)")
-    st.latex(r"\delta_F = F/\langle F\rangle -1")
-    st.latex(r"P_F(k)=|\tilde{\delta}_F(k)|^2")
+st.header("9. Redshift Mapping")
+st.latex(r"z_{abs}=\frac{\lambda_{obs}}{1215.67}-1")
+zabs = wave/1215.67 - 1
+fig4 = go.Figure()
+fig4.add_trace(go.Scatter(x=wave,y=zabs))
+st.plotly_chart(fig4, use_container_width=True)
+
+st.header("10. Statistics")
+stats = pd.DataFrame({
+    "Statistic":["Mean Flux","Median Flux","Std Flux","Min Flux","Max Flux"],
+    "Value":[np.nanmean(flux),np.nanmedian(flux),np.nanstd(flux),np.nanmin(flux),np.nanmax(flux)]
+})
+st.dataframe(stats, use_container_width=True)
+
+st.header("11. Power Spectrum Preview")
+st.latex(r"\delta_F=\frac{F}{\langle F\rangle}-1")
+st.latex(r"P_F(k)=|\tilde{\delta}_F(k)|^2")
+
+good = np.isfinite(flux)
+f = flux[good] - np.nanmean(flux[good])
+fft = np.fft.rfft(f)
+power = np.abs(fft)**2
+k = np.fft.rfftfreq(len(f), d=dv)
+
+fig5 = go.Figure()
+fig5.add_trace(go.Scatter(x=k[1:], y=power[1:]))
+fig5.update_xaxes(type="log")
+fig5.update_yaxes(type="log")
+st.plotly_chart(fig5, use_container_width=True)
+
+st.header("12. FITS Header")
+st.json(dict(header))
