@@ -1,25 +1,24 @@
 
-# FINAL FIXED VERSION
 import streamlit as st
 import numpy as np
 import pandas as pd
 from astropy.io import fits
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Lyα Forest Explorer", layout="wide")
+st.set_page_config(page_title="Lyα Forest Explorer v2", layout="wide")
 
-DEFAULT_FLUX = "J0011+1446_HIRES_flux(1).fits"
-DEFAULT_ERROR = "J0011+1446_HIRES_error(1).fits"
+DEFAULT_FLUX = "J0011+1446_HIRES_flux(2).fits"
+DEFAULT_ERROR = "J0011+1446_HIRES_error(2).fits"
 
 def load_fits(source):
     with fits.open(source) as hdul:
-        hdu_info = []
         data = None
         header = None
+        hdu_rows = []
 
         for i, hdu in enumerate(hdul):
             shape = None if hdu.data is None else str(np.shape(hdu.data))
-            hdu_info.append({"HDU": i, "Name": hdu.name, "Shape": shape})
+            hdu_rows.append({"HDU": i, "Name": hdu.name, "Shape": shape})
 
             if data is None and hdu.data is not None:
                 arr = np.asarray(hdu.data)
@@ -29,42 +28,69 @@ def load_fits(source):
 
                 arr = arr.astype(np.float64)
 
-                if arr.ndim > 1:
-                    arr = arr[0]
+                if arr.ndim == 2:
+                    if arr.shape[0] == 1:
+                        arr = arr[0]
+                    elif arr.shape[1] == 1:
+                        arr = arr[:, 0]
+                    else:
+                        arr = arr[0]
+
+                elif arr.ndim > 2:
+                    raise ValueError(f"Unsupported FITS shape {arr.shape}")
 
                 data = np.squeeze(arr)
                 header = hdu.header
 
-        if data is None:
-            raise ValueError("No data found in FITS file")
-
-    return data, header, pd.DataFrame(hdu_info)
+    return data, header, pd.DataFrame(hdu_rows)
 
 def wavelength_array(header, n):
     return 10 ** (header["CRVAL1"] + np.arange(n) * header["CDELT1"])
 
-st.title("🌌 Lyα Forest Explorer")
+st.title("🌌 Lyα Forest Explorer v2")
 
-uflux = st.file_uploader(
+flux_upload = st.file_uploader(
     "Upload Flux FITS",
     type=["fits"],
-    key="flux_upload"
+    key="flux_upload_v2"
 )
 
-uerr = st.file_uploader(
+error_upload = st.file_uploader(
     "Upload Error FITS",
     type=["fits"],
-    key="error_upload"
+    key="error_upload_v2"
 )
 
-if uflux and uerr:
-    flux, header, hdu_df = load_fits(uflux)
-    error, _, _ = load_fits(uerr)
-    st.success("Using uploaded files")
-else:
-    flux, header, hdu_df = load_fits(DEFAULT_FLUX)
-    error, _, _ = load_fits(DEFAULT_ERROR)
-    st.info("Using default bundled files")
+try:
+    if flux_upload and error_upload:
+        flux, header, hdu_df = load_fits(flux_upload)
+        error, _, _ = load_fits(error_upload)
+        st.success("Using uploaded files")
+    else:
+        flux, header, hdu_df = load_fits(DEFAULT_FLUX)
+        error, _, _ = load_fits(DEFAULT_ERROR)
+        st.info("Using bundled J0011+1446 example spectrum")
+except Exception as e:
+    st.error(str(e))
+    st.stop()
+
+st.header("Raw Data Check")
+
+c1, c2 = st.columns(2)
+with c1:
+    st.write("Flux shape:", flux.shape)
+    st.write(flux[:10])
+with c2:
+    st.write("Error shape:", error.shape)
+    st.write(error[:10])
+
+if np.all(flux == 0):
+    st.error("Flux array contains only zeros.")
+    st.stop()
+
+if np.all(error == 0):
+    st.error("Error array contains only zeros.")
+    st.stop()
 
 n = min(len(flux), len(error))
 flux = flux[:n]
@@ -76,54 +102,31 @@ snr = np.full(n, np.nan)
 good = np.isfinite(error) & (error > 0)
 snr[good] = flux[good] / error[good]
 
+obj = header.get("OBJECT", "Unknown")
+
 st.header("Object Summary")
+st.write("Object:", obj)
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Pixels", n)
-c2.metric("λ Min", f"{wave.min():.1f}")
-c3.metric("λ Max", f"{wave.max():.1f}")
-c4.metric("Median SNR", f"{np.nanmedian(snr):.2f}")
-
-st.header("FITS Structure")
 st.dataframe(hdu_df, width="stretch")
-
-st.header("Data Preview")
 
 preview = pd.DataFrame({
     "Pixel": np.arange(n),
-    "Wavelength": wave.astype(float),
-    "Flux": flux.astype(float),
-    "Error": error.astype(float),
-    "SNR": snr.astype(float)
+    "Wavelength": wave,
+    "Flux": flux,
+    "Error": error,
+    "SNR": snr
 })
 
-st.dataframe(preview.head(1000), width="stretch")
-
-st.header("Wavelength Calibration")
-st.latex(r"\lambda_i = 10^{CRVAL1+i\,CDELT1}")
+st.header("Preview")
+st.dataframe(preview.head(500), width="stretch")
 
 st.header("Spectrum")
-
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=wave, y=flux, name="Flux"))
 fig.add_trace(go.Scatter(x=wave, y=error, name="Error"))
-
 st.plotly_chart(fig, width="stretch")
 
-st.header("Signal to Noise")
-st.latex(r"S/N=\frac{F}{\sigma}")
-
+st.header("SNR")
 fig2 = go.Figure()
 fig2.add_trace(go.Scatter(x=wave, y=snr, name="SNR"))
 st.plotly_chart(fig2, width="stretch")
-
-st.header("Header Summary")
-important = {
-    k: header.get(k)
-    for k in ["OBJECT","INSTRUME","DATE","CRVAL1","CDELT1"]
-    if k in header
-}
-st.json(important)
-
-with st.expander("Full FITS Header"):
-    st.json(dict(header))
