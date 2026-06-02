@@ -6,216 +6,210 @@ import plotly.graph_objects as go
 
 st.set_page_config(
     page_title="Lyα Forest Explorer",
-    page_icon="🌌",
     layout="wide"
 )
 
-# =========================
-# Helper Functions
-# =========================
+# ---------------------------------------------------
+# FITS READER
+# ---------------------------------------------------
 
 def read_fits(uploaded_file):
-    data = fits.getdata(uploaded_file)
-    header = fits.getheader(uploaded_file)
+
+    uploaded_file.seek(0)
+
+    with fits.open(uploaded_file) as hdul:
+
+        data = None
+        header = None
+
+        for hdu in hdul:
+
+            if hdu.data is not None:
+
+                data = np.asarray(hdu.data).squeeze()
+                header = hdu.header
+                break
+
+        if data is None:
+            raise ValueError("No image data found in FITS file")
+
     return data, header
 
 
 def wavelength_array(header, npix):
+
+    if "CRVAL1" not in header:
+        raise ValueError("CRVAL1 not found in FITS header")
+
+    if "CDELT1" not in header:
+        raise ValueError("CDELT1 not found in FITS header")
+
     crval1 = header["CRVAL1"]
     cdelt1 = header["CDELT1"]
 
     pix = np.arange(npix)
 
-    wavelength = 10 ** (crval1 + pix * cdelt1)
+    wave = 10 ** (crval1 + pix * cdelt1)
 
-    return wavelength
+    return wave
 
 
 def velocity_width(header):
-    c = 299792.458  # km/s
+
+    c = 299792.458
 
     cdelt1 = header["CDELT1"]
 
-    dv = c * np.log(10) * cdelt1
-
-    return dv
+    return c * np.log(10) * cdelt1
 
 
-def calculate_snr(flux, error):
+# ---------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------
 
-    good = error > 0
-
-    snr = np.full_like(flux, np.nan, dtype=float)
-
-    snr[good] = flux[good] / error[good]
-
-    return snr
-
-
-def lya_emission(z):
-    return 1215.67 * (1 + z)
-
-
-def lyb_emission(z):
-    return 1025.72 * (1 + z)
-
-
-# =========================
-# Title
-# =========================
-
-st.title("🌌 Lyα Forest Explorer")
-st.markdown(
-    """
-Interactive visualization and analysis tool for
-HIRES / UVES quasar spectra.
-
-Upload a flux FITS file and corresponding error FITS file.
-"""
-)
-
-# =========================
-# Sidebar
-# =========================
-
-st.sidebar.header("Upload Files")
+st.sidebar.title("Lyα Forest Explorer")
 
 flux_file = st.sidebar.file_uploader(
-    "Flux FITS",
+    "Upload Flux FITS",
     type=["fits"]
 )
 
 error_file = st.sidebar.file_uploader(
-    "Error FITS",
+    "Upload Error FITS",
     type=["fits"]
 )
 
 if flux_file is None or error_file is None:
 
-    st.info("Upload both flux and error FITS files to begin.")
+    st.title("Lyα Forest Explorer")
+
+    st.info(
+        "Upload a flux FITS file and an error FITS file to begin."
+    )
 
     st.stop()
 
-# =========================
-# Read Data
-# =========================
+# ---------------------------------------------------
+# LOAD DATA
+# ---------------------------------------------------
 
-flux, header = read_fits(flux_file)
-error, _ = read_fits(error_file)
+try:
 
-wave = wavelength_array(header, len(flux))
+    flux, flux_header = read_fits(flux_file)
 
-snr = calculate_snr(flux, error)
+    error, error_header = read_fits(error_file)
 
-dv = velocity_width(header)
+except Exception as e:
 
-# =========================
-# Sidebar Navigation
-# =========================
+    st.error(f"FITS read error: {e}")
+    st.stop()
+
+# ---------------------------------------------------
+# CHECK LENGTHS
+# ---------------------------------------------------
+
+n = min(len(flux), len(error))
+
+flux = flux[:n]
+error = error[:n]
+
+# ---------------------------------------------------
+# WAVELENGTHS
+# ---------------------------------------------------
+
+try:
+
+    wave = wavelength_array(
+        flux_header,
+        len(flux)
+    )
+
+except Exception as e:
+
+    st.error(
+        f"Could not construct wavelength array: {e}"
+    )
+
+    st.stop()
+
+# ---------------------------------------------------
+# SNR
+# ---------------------------------------------------
+
+snr = np.full_like(
+    flux,
+    np.nan,
+    dtype=float
+)
+
+good = error > 0
+
+snr[good] = flux[good] / error[good]
+
+# ---------------------------------------------------
+# NAVIGATION
+# ---------------------------------------------------
 
 page = st.sidebar.radio(
-    "Navigation",
+    "Page",
     [
         "Overview",
         "Spectrum",
         "Signal-to-Noise",
         "Lyα Forest",
-        "Redshift Mapping",
-        "Power Spectrum (Preview)"
+        "Header"
     ]
 )
 
-# =========================
+# ---------------------------------------------------
 # OVERVIEW
-# =========================
+# ---------------------------------------------------
 
 if page == "Overview":
 
-    st.header("Data Overview")
+    st.title("Data Overview")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
-    with col1:
+    col1.metric(
+        "Pixels",
+        len(flux)
+    )
 
-        st.metric("Pixels", len(flux))
+    col2.metric(
+        "λ Min (Å)",
+        f"{wave.min():.1f}"
+    )
+
+    col3.metric(
+        "λ Max (Å)",
+        f"{wave.max():.1f}"
+    )
+
+    try:
+
+        dv = velocity_width(flux_header)
 
         st.metric(
-            "Velocity Bin (km/s)",
+            "Velocity Width (km/s)",
             f"{dv:.3f}"
         )
 
-        st.metric(
-            "Median S/N",
-            f"{np.nanmedian(snr):.2f}"
-        )
+    except:
+        pass
 
-    with col2:
-
-        st.metric(
-            "λ Min (Å)",
-            f"{wave.min():.2f}"
-        )
-
-        st.metric(
-            "λ Max (Å)",
-            f"{wave.max():.2f}"
-        )
-
-        st.metric(
-            "Wavelength Range (Å)",
-            f"{wave.max()-wave.min():.2f}"
-        )
-
-    st.subheader("Header Information")
-
-    header_df = pd.DataFrame(
-        {
-            "Keyword": list(header.keys()),
-            "Value": [str(header[k]) for k in header.keys()]
-        }
+    st.metric(
+        "Median S/N",
+        f"{np.nanmedian(snr):.2f}"
     )
 
-    st.dataframe(
-        header_df,
-        use_container_width=True,
-        height=400
-    )
-
-    with st.expander("What am I looking at?"):
-
-        st.markdown(
-            """
-### Flux Spectrum
-
-The flux file contains the measured quasar spectrum.
-
-### Error Spectrum
-
-The error file contains the 1σ uncertainty for every pixel.
-
-### Logarithmic Wavelength Grid
-
-The wavelength is calculated as:
-
-λ = 10^(CRVAL1 + i × CDELT1)
-
-which corresponds to approximately constant velocity spacing.
-
-### Lyα Forest
-
-The dense absorption blueward of the quasar's Lyα emission
-line is caused by intervening neutral hydrogen clouds and
-forms the Lyα forest.
-"""
-        )
-
-# =========================
+# ---------------------------------------------------
 # SPECTRUM
-# =========================
+# ---------------------------------------------------
 
 elif page == "Spectrum":
 
-    st.header("Spectrum Viewer")
+    st.title("Spectrum Viewer")
 
     fig = go.Figure()
 
@@ -248,13 +242,13 @@ elif page == "Spectrum":
         use_container_width=True
     )
 
-# =========================
+# ---------------------------------------------------
 # SNR
-# =========================
+# ---------------------------------------------------
 
 elif page == "Signal-to-Noise":
 
-    st.header("Signal-to-Noise")
+    st.title("Signal-to-Noise")
 
     fig = go.Figure()
 
@@ -278,44 +272,22 @@ elif page == "Signal-to-Noise":
         use_container_width=True
     )
 
-    st.subheader("S/N Distribution")
-
-    hist = go.Figure()
-
-    hist.add_trace(
-        go.Histogram(
-            x=snr[np.isfinite(snr)],
-            nbinsx=100
-        )
-    )
-
-    hist.update_layout(
-        xaxis_title="S/N",
-        yaxis_title="Count"
-    )
-
-    st.plotly_chart(
-        hist,
-        use_container_width=True
-    )
-
-# =========================
+# ---------------------------------------------------
 # LYA FOREST
-# =========================
+# ---------------------------------------------------
 
 elif page == "Lyα Forest":
 
-    st.header("Lyα Forest Explorer")
+    st.title("Lyα Forest Explorer")
 
     z_qso = st.number_input(
         "Quasar Redshift",
-        min_value=0.0,
         value=5.0,
         step=0.01
     )
 
-    lya = lya_emission(z_qso)
-    lyb = lyb_emission(z_qso)
+    lya = 1215.67 * (1 + z_qso)
+    lyb = 1025.72 * (1 + z_qso)
 
     forest_start = 1040 * (1 + z_qso)
     forest_end = 1180 * (1 + z_qso)
@@ -333,21 +305,18 @@ elif page == "Lyα Forest":
 
     fig.add_vline(
         x=lya,
-        line_dash="dash",
-        annotation_text="Lyα"
+        line_dash="dash"
     )
 
     fig.add_vline(
         x=lyb,
-        line_dash="dash",
-        annotation_text="Lyβ"
+        line_dash="dash"
     )
 
     fig.add_vrect(
         x0=forest_start,
         x1=forest_end,
-        opacity=0.2,
-        annotation_text="Lyα Forest"
+        opacity=0.2
     )
 
     fig.update_layout(
@@ -361,129 +330,43 @@ elif page == "Lyα Forest":
         use_container_width=True
     )
 
-    st.markdown(f"""
-### Important Wavelengths
-
-- Lyβ Emission: **{lyb:.2f} Å**
-- Lyα Emission: **{lya:.2f} Å**
-
-### Standard Forest Region
-
-1040 Å < λ_rest < 1180 Å
-
-Observed Forest Range:
-
-**{forest_start:.2f} Å – {forest_end:.2f} Å**
-""")
-
-# =========================
-# REDSHIFT
-# =========================
-
-elif page == "Redshift Mapping":
-
-    st.header("Absorber Redshift Mapping")
-
-    z_abs = wave / 1215.67 - 1
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=wave,
-            y=z_abs,
-            mode="lines"
-        )
+    st.write(
+        f"Lyβ = {lyb:.2f} Å"
     )
 
-    fig.update_layout(
-        xaxis_title="Observed Wavelength (Å)",
-        yaxis_title="Absorber Redshift",
-        height=700
+    st.write(
+        f"Lyα = {lya:.2f} Å"
     )
 
-    st.plotly_chart(
-        fig,
+    st.write(
+        f"Forest region = {forest_start:.2f}–{forest_end:.2f} Å"
+    )
+
+# ---------------------------------------------------
+# HEADER
+# ---------------------------------------------------
+
+elif page == "Header":
+
+    st.title("FITS Header")
+
+    header_df = pd.DataFrame(
+        {
+            "Keyword": list(flux_header.keys()),
+            "Value": [
+                str(flux_header[k])
+                for k in flux_header.keys()
+            ]
+        }
+    )
+
+    st.dataframe(
+        header_df,
         use_container_width=True
     )
 
-    st.markdown(
-        """
-For every pixel:
+    st.subheader("Header Dictionary")
 
-z_abs = λ_obs / 1215.67 − 1
-
-This converts wavelength into the redshift of the
-absorbing hydrogen cloud.
-"""
-    )
-
-# =========================
-# POWER SPECTRUM
-# =========================
-
-elif page == "Power Spectrum (Preview)":
-
-    st.header("Flux Power Spectrum")
-
-    st.warning(
-        """
-This is only a demonstration FFT.
-
-For scientific analysis you will need:
-
-1. Continuum fitting
-2. Mean flux normalization
-3. Masking bad pixels
-4. Resolution correction
-5. Noise subtraction
-
-before reproducing Boera et al. (2019).
-"""
-    )
-
-    good = np.isfinite(flux)
-
-    flux_good = flux[good]
-
-    flux_good = flux_good - np.mean(flux_good)
-
-    fft = np.fft.rfft(flux_good)
-
-    power = np.abs(fft) ** 2
-
-    k = np.fft.rfftfreq(
-        len(flux_good),
-        d=dv
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=k[1:],
-            y=power[1:],
-            mode="lines"
-        )
-    )
-
-    fig.update_xaxes(type="log")
-    fig.update_yaxes(type="log")
-
-    fig.update_layout(
-        xaxis_title="k",
-        yaxis_title="Power",
-        height=700
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-    st.markdown(
-        """
-This page is a placeholder for the actual
-Lyα forest flux power spectrum calculation.
-"""
+    st.json(
+        dict(flux_header)
     )
