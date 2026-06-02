@@ -87,6 +87,55 @@ good = np.isfinite(flux) & np.isfinite(error) & (error > 0)
 snr[good] = flux[good] / error[good]
 
 # --------------------------------------------------
+# OBJECT INFORMATION
+# --------------------------------------------------
+
+st.header("🛰️ Object Information")
+
+object_name = header.get("OBJECT", "Unknown")
+instrument = header.get("INSTRUME", "Unknown")
+flux_units = header.get("BUNIT", "Not specified")
+
+st.write("Object:", object_name)
+st.write("Instrument:", instrument)
+st.write("Flux Units:", flux_units)
+
+header_z = None
+for key in ["REDSHIFT", "Z", "EMZ", "QSO_Z"]:
+    if key in header:
+        try:
+            header_z = float(header[key])
+            break
+        except:
+            pass
+
+known_redshifts = {
+    "SDSS J0011+1446": 4.967,
+    "J0011+1446": 4.967,
+}
+
+default_z = header_z if header_z is not None else known_redshifts.get(object_name, 5.0)
+
+st.metric("Quasar Redshift", f"{default_z:.3f}")
+
+st.subheader("Derived Quantities")
+
+st.latex(r"\lambda_{\alpha}=1215.67(1+z)")
+st.latex(r"\lambda_{\beta}=1025.72(1+z)")
+
+lya_obs = 1215.67 * (1 + default_z)
+lyb_obs = 1025.72 * (1 + default_z)
+
+st.write(f"Observed Lyα wavelength: {lya_obs:.1f} Å")
+st.write(f"Observed Lyβ wavelength: {lyb_obs:.1f} Å")
+
+forest_start = 1040 * (1 + default_z)
+forest_end = 1180 * (1 + default_z)
+
+st.write(f"Expected Lyα forest region: {forest_start:.1f} Å – {forest_end:.1f} Å")
+
+
+# --------------------------------------------------
 # WORKFLOW EXPLANATION
 # --------------------------------------------------
 
@@ -264,7 +313,7 @@ st.header("8️⃣ Lyα Forest")
 
 z = st.number_input(
     "Quasar Redshift",
-    value=5.0,
+    value=float(default_z),
     step=0.01
 )
 
