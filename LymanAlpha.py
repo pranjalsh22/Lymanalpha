@@ -48,8 +48,8 @@ def wavelength_array(header, n):
         + np.arange(n) * header["CDELT1"]
     )
 
-st.title("🌌 Lyα Forest Explorer")
-st.caption("Interactive walkthrough from FITS files to Lyα forest spectra")
+st.title("Lyα Forest")
+#st.caption("Interactive walkthrough from FITS files to Lyα forest spectra")
 
 flux_upload = st.file_uploader(
     "Upload Flux FITS",
@@ -76,10 +76,16 @@ except Exception as e:
     st.error(str(e))
     st.stop()
 
-n = min(len(flux), len(error))
-flux = flux[:n]
-error = error[:n]
 
+if len(flux) != len(error):
+    st.error(
+        f"Flux length ({len(flux)}) "
+        f"does not match "
+        f"error length ({len(error)})"
+    )
+    st.stop()
+
+n = len(flux)
 wave = wavelength_array(header, n)
 
 snr = np.full(n, np.nan)
@@ -90,7 +96,7 @@ snr[good] = flux[good] / error[good]
 # OBJECT INFORMATION
 # --------------------------------------------------
 
-st.header("🛰️ Object Information")
+st.header("Object Information")
 
 object_name = header.get("OBJECT", "Unknown")
 instrument = header.get("INSTRUME", "Unknown")
