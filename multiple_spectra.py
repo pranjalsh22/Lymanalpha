@@ -1,3 +1,4 @@
+# part 1
 
 import os
 import numpy as np
@@ -6,188 +7,550 @@ import streamlit as st
 from astropy.io import fits
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Quasar Dataset Explorer", layout="wide")
+st.set_page_config(
+    page_title="Quasar Dataset Explorer",
+    layout="wide"
+)
 
-SPECS_DIR = "specs"
+SPEC_DIR = "spec"
+
+# --------------------------------------------------
+# FITS READER
+# --------------------------------------------------
 
 def load_fits(source):
+
     with fits.open(source) as hdul:
+
         for hdu in hdul:
+
             if hdu.data is not None:
-                data = np.squeeze(np.array(hdu.data, dtype=np.float64))
-                return data, hdu.header
-    raise ValueError(f"No data found in {source}")
+
+                arr = np.array(
+                    hdu.data,
+                    dtype=np.float64
+                )
+
+                if arr.ndim == 2:
+
+                    if arr.shape[0] == 1:
+                        arr = arr[0]
+
+                    elif arr.shape[1] == 1:
+                        arr = arr[:, 0]
+
+                return (
+                    np.squeeze(arr),
+                    hdu.header
+                )
+
+    raise ValueError(
+        f"No spectrum found in {source}"
+    )
+
+
+# --------------------------------------------------
+# WAVELENGTH ARRAY
+# --------------------------------------------------
 
 def wavelength_array(header, n):
-    return 10 ** (header["CRVAL1"] + np.arange(n) * header["CDELT1"])
+
+    return 10 ** (
+        header["CRVAL1"]
+        + np.arange(n) * header["CDELT1"]
+    )
+
+
+# --------------------------------------------------
+# VELOCITY SPACING
+# --------------------------------------------------
+
+def velocity_spacing(header):
+
+    return (
+        299792.458
+        * np.log(10)
+        * header["CDELT1"]
+    )
+
+
+# --------------------------------------------------
+# QUALITY LABEL
+# --------------------------------------------------
+
+def quality_label(snr):
+
+    if snr > 20:
+        return "Excellent"
+
+    elif snr > 10:
+        return "Good"
+
+    elif snr > 5:
+        return "Moderate"
+
+    else:
+        return "Poor"
+
+
+# --------------------------------------------------
+# FIND FLUX/ERROR PAIRS
+# --------------------------------------------------
 
 def find_pairs(folder):
+
     pairs = {}
+
     if not os.path.isdir(folder):
         return {}
 
     for fname in os.listdir(folder):
-        if not fname.lower().endswith(".fits"):
+
+        if not fname.endswith(".fits"):
             continue
 
-        full = os.path.join(folder, fname)
+        full = os.path.join(
+            folder,
+            fname
+        )
 
         if "_flux" in fname:
-            key = fname.replace("_flux.fits", "")
-            pairs.setdefault(key, {})["flux"] = full
+
+            key = fname.replace(
+                "_flux.fits",
+                ""
+            )
+
+            pairs.setdefault(
+                key,
+                {}
+            )
+
+            pairs[key]["flux"] = full
 
         elif "_error" in fname:
-            key = fname.replace("_error.fits", "")
-            pairs.setdefault(key, {})["error"] = full
 
-    return {k:v for k,v in pairs.items() if "flux" in v and "error" in v}
+            key = fname.replace(
+                "_error.fits",
+                ""
+            )
 
-st.title("🌌 Quasar Dataset Explorer")
+            pairs.setdefault(
+                key,
+                {}
+            )
 
-pairs = find_pairs(SPECS_DIR)
+            pairs[key]["error"] = full
 
-if not pairs:
-    st.error(f"No matched FITS pairs found in '{SPECS_DIR}'")
+    return {
+
+        k: v
+
+        for k, v in pairs.items()
+
+        if (
+            "flux" in v
+            and
+            "error" in v
+        )
+    }
+
+# part 2
+
+st.title(
+    "🌌 Quasar Dataset Explorer"
+)
+
+pairs = find_pairs(SPEC_DIR)
+
+if len(pairs) == 0:
+
+    st.error(
+        f"No matched spectra found in {SPEC_DIR}"
+    )
+
     st.stop()
 
 spectra = []
-rows = []
+summary_rows = []
 
 for key, files in pairs.items():
+
     try:
-        flux, header = load_fits(files["flux"])
-        error, _ = load_fits(files["error"])
+
+        flux, header = load_fits(
+            files["flux"]
+        )
+
+        error, _ = load_fits(
+            files["error"]
+        )
 
         if len(flux) != len(error):
             continue
 
         n = len(flux)
-        wave = wavelength_array(header, n)
 
-        snr = np.full(n, np.nan)
-        good = np.isfinite(flux) & np.isfinite(error) & (error > 0)
-        snr[good] = flux[good] / error[good]
+        wave = wavelength_array(
+            header,
+            n
+        )
 
-        instrument = "HIRES" if "HIRES" in key.upper() else ("UVES" if "UVES" in key.upper() else "Unknown")
-        obj = header.get("OBJECT", key)
+        snr = np.full(
+            n,
+            np.nan
+        )
 
-        z = None
-        for k in ["REDSHIFT", "Z", "EMZ", "QSO_Z"]:
-            if k in header:
-                try:
-                    z = float(header[k])
-                    break
-                except:
-                    pass
+        good = (
+            np.isfinite(flux)
+            &
+            np.isfinite(error)
+            &
+            (error > 0)
+        )
 
-        masked = 100*np.sum(~np.isfinite(flux))/len(flux)
+        snr[good] = (
+            flux[good]
+            /
+            error[good]
+        )
 
-        rows.append({
-            "Object": obj,
-            "Instrument": instrument,
-            "Pixels": n,
-            "Lambda Min (A)": float(np.nanmin(wave)),
-            "Lambda Max (A)": float(np.nanmax(wave)),
-            "Median S/N": float(np.nanmedian(snr)),
-            "Masked %": masked
-        })
+        median_snr = float(
+            np.nanmedian(snr)
+        )
+
+        masked_fraction = (
+            np.sum(
+                ~np.isfinite(flux)
+            )
+            /
+            len(flux)
+            * 100
+        )
+
+        object_name = header.get(
+            "OBJECT",
+            key
+        )
+
+        instrument = header.get(
+            "INSTRUME",
+            "Unknown"
+        )
+
+        dv = velocity_spacing(
+            header
+        )
 
         spectra.append({
-            "object": obj,
-            "instrument": instrument,
-            "wave": wave,
-            "flux": flux,
-            "error": error,
-            "snr": snr,
-            "z": z,
-            "header": header
+
+            "object":
+                object_name,
+
+            "instrument":
+                instrument,
+
+            "wave":
+                wave,
+
+            "flux":
+                flux,
+
+            "error":
+                error,
+
+            "snr":
+                snr,
+
+            "header":
+                header,
+
+            "median_snr":
+                median_snr,
+
+            "masked_fraction":
+                masked_fraction,
+
+            "dv":
+                dv
+        })
+
+        summary_rows.append({
+
+            "Object":
+                object_name,
+
+            "Instrument":
+                instrument,
+
+            "Pixels":
+                len(flux),
+
+            "Lambda Min":
+                wave.min(),
+
+            "Lambda Max":
+                wave.max(),
+
+            "Median S/N":
+                median_snr,
+
+            "Masked %":
+                masked_fraction,
+
+            "dv (km/s)":
+                dv
         })
 
     except Exception as e:
-        st.warning(f"Failed: {key} ({e})")
 
-df = pd.DataFrame(rows)
+        st.warning(
+            f"{key}: {e}"
+        )
 
-st.header("Dataset Summary")
-st.dataframe(df, use_container_width=True)
+summary_df = pd.DataFrame(
+    summary_rows
+)
 
-if not df.empty:
-    st.header("S/N Ranking")
-    st.dataframe(df.sort_values("Median S/N", ascending=False), use_container_width=True)
+st.header(
+    "Dataset Summary"
+)
 
-st.header("All Spectra Overlay")
+st.dataframe(
+    summary_df,
+    use_container_width=True
+)
 
-normalize = st.checkbox("Normalize Spectra", value=True)
+st.header(
+    "S/N Ranking"
+)
 
-fig = go.Figure()
+st.dataframe(
+
+    summary_df.sort_values(
+        "Median S/N",
+        ascending=False
+    ),
+
+    use_container_width=True
+)
+
+#part 3
+
+st.header(
+    "Individual Quasar Reports"
+)
 
 for spec in spectra:
-    mask = np.isfinite(spec["flux"])
-    y = spec["flux"][mask]
 
-    if normalize:
-        med = np.nanmedian(y)
-        if np.isfinite(med) and med != 0:
-            y = y / med
+    with st.expander(
 
-    fig.add_trace(go.Scatter(
-        x=spec["wave"][mask],
-        y=y,
-        mode="lines",
-        name=spec["object"]
-    ))
+        f"{spec['object']} ({spec['instrument']})",
 
-fig.update_layout(
-    xaxis_title="Observed Wavelength (Å)",
-    yaxis_title="Normalized Flux" if normalize else "Flux"
-)
+        expanded=False
+    ):
 
-st.plotly_chart(fig, use_container_width=True)
+        flux = spec["flux"]
+        error = spec["error"]
+        wave = spec["wave"]
+        snr = spec["snr"]
 
-st.header("Individual Spectrum Viewer")
+        finite_pixels = int(
+            np.sum(
+                np.isfinite(flux)
+            )
+        )
 
-selected = st.selectbox("Object", [s["object"] for s in spectra])
-spec = next(s for s in spectra if s["object"] == selected)
+        masked_pixels = int(
+            np.sum(
+                ~np.isfinite(flux)
+            )
+        )
 
-fig2 = go.Figure()
-mask = np.isfinite(spec["flux"])
+        c1, c2, c3, c4 = st.columns(4)
 
-fig2.add_trace(go.Scatter(
-    x=spec["wave"][mask],
-    y=spec["flux"][mask],
-    mode="lines",
-    name="Flux"
-))
+        c1.metric(
+            "Median S/N",
+            f"{spec['median_snr']:.2f}"
+        )
 
-if spec["z"] is not None:
-    z = spec["z"]
-    fig2.add_vline(x=1215.67*(1+z))
-    fig2.add_vline(x=1025.72*(1+z))
-    fig2.add_vrect(x0=1040*(1+z), x1=1180*(1+z), opacity=0.15)
+        c2.metric(
+            "Quality",
+            quality_label(
+                spec["median_snr"]
+            )
+        )
 
-fig2.update_layout(
-    xaxis_title="Observed Wavelength (Å)",
-    yaxis_title="Flux"
-)
+        c3.metric(
+            "Masked %",
+            f"{spec['masked_fraction']:.2f}"
+        )
 
-st.plotly_chart(fig2, use_container_width=True)
+        c4.metric(
+            "Velocity Spacing",
+            f"{spec['dv']:.2f}"
+        )
 
-fig3 = go.Figure()
-snrmask = np.isfinite(spec["snr"])
+        st.write(
+            f"Pixels: {len(flux)}"
+        )
 
-fig3.add_trace(go.Scatter(
-    x=spec["wave"][snrmask],
-    y=spec["snr"][snrmask],
-    mode="lines",
-    name="S/N"
-))
+        st.write(
+            f"Finite Pixels: {finite_pixels}"
+        )
 
-fig3.update_layout(
-    xaxis_title="Observed Wavelength (Å)",
-    yaxis_title="Signal-to-Noise Ratio"
-)
+        st.write(
+            f"Masked Pixels: {masked_pixels}"
+        )
 
-st.plotly_chart(fig3, use_container_width=True)
+        st.write(
+            f"Wavelength Range: "
+            f"{wave.min():.1f}"
+            f"–"
+            f"{wave.max():.1f} Å"
+        )
 
-with st.expander("FITS Header"):
-    st.json(dict(spec["header"]))
+        # -----------------------
+        # FLUX
+        # -----------------------
+
+        mask = np.isfinite(flux)
+
+        fig1 = go.Figure()
+
+        fig1.add_trace(
+
+            go.Scatter(
+
+                x=wave[mask],
+
+                y=flux[mask],
+
+                mode="lines",
+
+                name="Flux"
+            )
+        )
+
+        fig1.update_layout(
+
+            title="Flux Spectrum",
+
+            xaxis_title=
+                "Observed Wavelength (Å)",
+
+            yaxis_title=
+                "Flux"
+        )
+
+        st.plotly_chart(
+            fig1,
+            use_container_width=True
+        )
+
+        # -----------------------
+        # ERROR
+        # -----------------------
+
+        emask = np.isfinite(error)
+
+        fig2 = go.Figure()
+
+        fig2.add_trace(
+
+            go.Scatter(
+
+                x=wave[emask],
+
+                y=error[emask],
+
+                mode="lines",
+
+                name="Error"
+            )
+        )
+
+        fig2.update_layout(
+
+            title="Error Spectrum",
+
+            xaxis_title=
+                "Observed Wavelength (Å)",
+
+            yaxis_title=
+                "1σ Error"
+        )
+
+        st.plotly_chart(
+            fig2,
+            use_container_width=True
+        )
+
+        # -----------------------
+        # SNR
+        # -----------------------
+
+        smask = np.isfinite(snr)
+
+        fig3 = go.Figure()
+
+        fig3.add_trace(
+
+            go.Scatter(
+
+                x=wave[smask],
+
+                y=snr[smask],
+
+                mode="lines",
+
+                name="SNR"
+            )
+        )
+
+        fig3.update_layout(
+
+            title="Signal-to-Noise Ratio",
+
+            xaxis_title=
+                "Observed Wavelength (Å)",
+
+            yaxis_title=
+                "S/N"
+        )
+
+        st.plotly_chart(
+            fig3,
+            use_container_width=True
+        )
+
+        # -----------------------
+        # ANALYSIS
+        # -----------------------
+
+        st.subheader(
+            "Automatic Analysis"
+        )
+
+        st.write(
+
+            f"This {spec['instrument']} spectrum "
+            f"contains {len(flux):,} pixels. "
+            f"The median S/N is "
+            f"{spec['median_snr']:.2f}, "
+            f"which corresponds to "
+            f"{quality_label(spec['median_snr'])} "
+            f"data quality. "
+
+            f"The masked fraction is "
+            f"{spec['masked_fraction']:.2f}% "
+            f"and the velocity spacing is "
+            f"{spec['dv']:.2f} km/s."
+        )
+
+        with st.expander(
+            "FITS Header"
+        ):
+            st.json(
+                dict(spec["header"])
+            )
