@@ -139,7 +139,7 @@ def find_pairs(folder):
 
 # part 2
 
-st.title("Quasar Dataset Explorer")
+st.title(".fit file plots")
 
 pairs = find_pairs(SPEC_DIR)
 
