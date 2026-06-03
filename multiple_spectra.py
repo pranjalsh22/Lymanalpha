@@ -1,4 +1,3 @@
-# part 1
 
 import os
 import numpy as np
@@ -8,19 +7,15 @@ from astropy.io import fits
 import plotly.graph_objects as go
 
 st.set_page_config(
-    page_title="Quasar Dataset Explorer",
+    page_title=".fit file plots",
     layout="wide"
 )
 
 SPEC_DIR = "spec"
 
-# --------------------------------------------------
-# FITS READER
-# --------------------------------------------------
-
 def load_fits(source):
 
-    with fits.open(source) as hdul:
+    with fits.open(source) as hdul: #HDU is Header data unit list. in this case there's only one HDU 
 
         for hdu in hdul:
 
@@ -31,7 +26,7 @@ def load_fits(source):
                     dtype=np.float64
                 )
 
-                if arr.ndim == 2:
+                if arr.ndim == 2: #ndim is no. of dimensions
 
                     if arr.shape[0] == 1:
                         arr = arr[0]
@@ -61,10 +56,6 @@ def wavelength_array(header, n):
     )
 
 
-# --------------------------------------------------
-# VELOCITY SPACING
-# --------------------------------------------------
-
 def velocity_spacing(header):
 
     return (
@@ -73,29 +64,20 @@ def velocity_spacing(header):
         * header["CDELT1"]
     )
 
-
-# --------------------------------------------------
-# QUALITY LABEL
-# --------------------------------------------------
-
 def quality_label(snr):
 
     if snr > 20:
-        return "Excellent"
+        return "Excellent(>20)"
 
     elif snr > 10:
-        return "Good"
+        return "Good(>10)"
 
     elif snr > 5:
-        return "Moderate"
+        return "Moderate(>5)"
 
     else:
-        return "Poor"
+        return "Poor(<5)"
 
-
-# --------------------------------------------------
-# FIND FLUX/ERROR PAIRS
-# --------------------------------------------------
 
 def find_pairs(folder):
 
@@ -157,9 +139,7 @@ def find_pairs(folder):
 
 # part 2
 
-st.title(
-    "🌌 Quasar Dataset Explorer"
-)
+st.title("Quasar Dataset Explorer")
 
 pairs = find_pairs(SPEC_DIR)
 
@@ -321,25 +301,23 @@ st.dataframe(
     use_container_width=True
 )
 
-st.header(
-    "S/N Ranking"
-)
+#st.header(
+#    "S/N Ranking"
+#)
 
-st.dataframe(
+#st.dataframe(
 
-    summary_df.sort_values(
-        "Median S/N",
-        ascending=False
-    ),
-
-    use_container_width=True
-)
+#    summary_df.sort_values(
+#        "Median S/N",
+#        ascending=False
+#    ),
+#
+#    use_container_width=True
+#)
 
 #part 3
 
-st.header(
-    "Individual Quasar Reports"
-)
+st.header("Flux plots")
 
 for spec in spectra:
 
@@ -452,39 +430,39 @@ for spec in spectra:
         # ERROR
         # -----------------------
 
-        emask = np.isfinite(error)
+  #      emask = np.isfinite(error)
 
-        fig2 = go.Figure()
+  #      fig2 = go.Figure()
 
-        fig2.add_trace(
+  #      fig2.add_trace(
+#
+  #          go.Scatter(
 
-            go.Scatter(
+  #              x=wave[emask],
 
-                x=wave[emask],
+   #             y=error[emask],
 
-                y=error[emask],
+   #             mode="lines",
 
-                mode="lines",
+   #             name="Error"
+    #        )
+    #    )
 
-                name="Error"
-            )
-        )
+     #   fig2.update_layout(
 
-        fig2.update_layout(
+     #       title="Error Spectrum",
 
-            title="Error Spectrum",
+     #       xaxis_title=
+     #           "Observed Wavelength (Å)",
 
-            xaxis_title=
-                "Observed Wavelength (Å)",
+      #      yaxis_title=
+     #           "1σ Error"
+      #  )
 
-            yaxis_title=
-                "1σ Error"
-        )
-
-        st.plotly_chart(
-            fig2,
-            use_container_width=True
-        )
+      #  st.plotly_chart(
+     #       fig2,
+      #      use_container_width=True
+     #   )
 
         # -----------------------
         # SNR
@@ -527,10 +505,6 @@ for spec in spectra:
         # -----------------------
         # ANALYSIS
         # -----------------------
-
-        st.subheader(
-            "Automatic Analysis"
-        )
 
         st.write(
 
