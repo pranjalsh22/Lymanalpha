@@ -5,7 +5,7 @@ import pandas as pd
 from astropy.io import fits
 import plotly.graph_objects as go
 
-#st.set_page_config(page_title="Lyα Forest Explorer", layout="wide")
+st.set_page_config(page_title="Lyα Forest Explorer", layout="wide")
 
 DEFAULT_FLUX = "J0011+1446_HIRES_flux.fits"
 DEFAULT_ERROR = "J0011+1446_HIRES_error.fits"
