@@ -139,7 +139,7 @@ def find_pairs(folder):
 
 # part 2
 
-st.title(".fit file plots")
+st.title("Quasar Spectra")
 
 pairs = find_pairs(SPEC_DIR)
 
@@ -317,7 +317,7 @@ st.dataframe(
 
 #part 3
 
-st.header("Flux plots")
+st.header("Individual Spectra")
 
 for spec in spectra:
 
@@ -420,7 +420,9 @@ for spec in spectra:
             yaxis_title=
                 "Flux"
         )
-
+        fig1.update_yaxes(
+            tickformat=".2e"
+        )
         st.plotly_chart(
             fig1,
             use_container_width=True
