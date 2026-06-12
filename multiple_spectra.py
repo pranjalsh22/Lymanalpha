@@ -6,6 +6,55 @@ import pandas as pd
 import streamlit as st
 from astropy.io import fits
 import plotly.graph_objects as go
+import plotly.io as pio
+
+pio.templates["astrophysics"] = dict(
+    layout=dict(
+
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+
+        font=dict(
+            family="Times New Roman",
+            size=16,
+            color="black"),
+
+        title=dict(
+            font=dict(
+                size=22,
+                color="black")),
+
+        xaxis=dict(
+            showline=True,
+            linecolor="black",
+            linewidth=1.5,
+            mirror=True,
+            tickfont=dict(
+                color="black",
+                size=14),
+            title_font=dict(
+                color="black",
+                size=18),
+            gridcolor="#d9d9d9"
+        ),
+
+        yaxis=dict(
+            showline=True,
+            linecolor="black",
+            linewidth=1.5,
+            mirror=True,
+            tickfont=dict(
+                color="black",
+                size=14),
+            title_font=dict(
+                color="black",
+                size=18),
+            gridcolor="#d9d9d9"),
+
+        legend=dict(font=dict(color="black",size=14))))
+
+pio.templates.default = "astrophysics"
+
 
 st.set_page_config(
     page_title=".fit file plots",
