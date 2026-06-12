@@ -120,12 +120,27 @@ def snr_calculations(n,header,flux,error):
     return snr,median_snr,masked_fraction
 
 #---section 2.7: Lya power spectrum--------------------------------
-def extract_lya_forest(wave_obs,flux,z,rest_min=1040,rest_max=1180):
+def extract_lya_forest(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
 
     wave_rest = (wave_obs/ (1 + z))
 
-    mask = ((wave_rest >= rest_min) & (wave_rest <= rest_max) & np.isfinite(flux) & np.isfinite(error)&(error > 0))
+    good_flux = np.isfinite(flux)
 
+    good_error = (
+        np.isfinite(error)
+        &
+        (error > 0)
+    )
+
+    mask = (
+        (wave_rest >= rest_min)
+        &
+        (wave_rest <= rest_max)
+        &
+        good_flux
+        &
+        good_error
+    )
     return (wave_rest[mask],flux[mask])
 
 #---section 2.8: flux_contrast--------------------------------
@@ -201,9 +216,9 @@ def boera_quantity(k,pk):
 
 #---- section 2.14: master power spectrum function
 
-def lya_power_spectrum(wave_obs,flux,z):
+def lya_power_spectrum(wave_obs,flux,error,z):
 
-    wave_rest, flux_forest = (extract_lya_forest(wave_obs,flux,z))
+    wave_rest, flux_forest = (extract_lya_forest(wave_obs,flux,error,z))
 
     if len(flux_forest) < 10:
         return None
@@ -315,7 +330,7 @@ for key, files in pairs.items():
 
         z = redshifts[key]
 
-        ps = lya_power_spectrum(wave,flux,z)
+        ps = lya_power_spectrum(wave,flux,error,z)
 
         dv = velocity_spacing(header)
 
