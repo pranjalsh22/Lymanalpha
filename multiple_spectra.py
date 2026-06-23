@@ -732,10 +732,10 @@ for spec in spectra:
             #==================================================
             #A) Raw Power Spectra
             #==================================================
-            st.subheader("A) Raw Power Spectra:")
-            col1, col2 = st.columns(2)
+            with st.expander("A) Raw Power Spectra:"):
+            
 
-            with col1:
+            
                 fig_fft = go.Figure()
                 fig_fft.add_trace(
                     go.Scatter(x=ps_fft["logk"],y=ps_fft["logkpk"],mode="lines",name="FFT"))
@@ -750,7 +750,7 @@ for spec in spectra:
                     use_container_width=True,
                     config=plotly_download_config(spec["object"],"FFTPowerSpectrum"))
 
-            with col2:
+            
 
                 fig_lomb = go.Figure()
 
@@ -778,11 +778,7 @@ for spec in spectra:
             #==================================================
             #B) Binned Power Spectra
             #==================================================
-            st.subheader("B) Binned Power Spectra")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
+            with st.expander("B) Binned Power Spectra",expanded=True):
 
                 fig_fft_bin = go.Figure()
 
@@ -816,7 +812,6 @@ for spec in spectra:
                     use_container_width=True,
                     config=plotly_download_config(spec["object"],"FFT_Binned_PowerSpectrum"))
 
-            with col2:
 
                 fig_lomb_bin = go.Figure()
 
@@ -860,306 +855,307 @@ for spec in spectra:
             #==================================================
             #C) FFT vs Lomb Comparison
             #==================================================
+            with st.expander("C) FFT vs Lomb-Scargle Comparison",expanded=True):
 
-            st.subheader("C) FFT vs Lomb-Scargle Comparison")
+                fig_compare = go.Figure()
 
-            fig_compare = go.Figure()
+                fig_compare.add_trace(
 
-            fig_compare.add_trace(
+                    go.Scatter(
+                        x=ps_fft["logk_bin"],
 
-                go.Scatter(
-                    x=ps_fft["logk_bin"],
+                        y=ps_fft["logpk_bin"],
+                        
+                        mode="lines",
 
-                    y=ps_fft["logpk_bin"],
-                    
-                    mode="lines",
+                        name="FFT"
 
-                    name="FFT"
-
+                    )
                 )
-            )
 
-            fig_compare.add_trace(
+                fig_compare.add_trace(
 
-                go.Scatter(
+                    go.Scatter(
 
-                    x=ps_lomb["logk_bin"],
+                        x=ps_lomb["logk_bin"],
 
-                    y=ps_lomb["logpk_bin"],
+                        y=ps_lomb["logpk_bin"],
 
 
-                    mode="lines",
+                        mode="lines",
 
-                    name="Lomb-Scargle"))
+                        name="Lomb-Scargle"))
 
-            fig_compare.update_layout(
+                fig_compare.update_layout(
 
-                title=f"FFT(Global Mean) vs Lomb-Scargle (Rolling Mean: Window={window_size},Bins=20)",
+                    title=f"FFT(Global Mean) vs Lomb-Scargle (Rolling Mean: Window={window_size},Bins=20)",
 
-                xaxis_title="log₁₀(k / km⁻¹ s)",
+                    xaxis_title="log₁₀(k / km⁻¹ s)",
 
-                yaxis_title="log₁₀(kP(k)/π)")
+                    yaxis_title="log₁₀(kP(k)/π)")
 
-            st.plotly_chart(
-                fig_compare,
-                use_container_width=True,
-                    config=plotly_download_config(spec["object"],"FFT_vs_LombScarglePowerSpectrum"))
+                st.plotly_chart(
+                    fig_compare,
+                    use_container_width=True,
+                        config=plotly_download_config(spec["object"],"FFT_vs_LombScarglePowerSpectrum"))
             #==================================================
-            # Raw Data Tables
+            # Data Tables
             #==================================================
+            with st.expander("Data Table"):
+                #==================================================
+                # Raw Data Tables
+                #==================================================
+                
+                st.subheader("Raw Power Spectrum Tables")
 
-            st.subheader("Raw Power Spectrum Tables")
+                fft_raw_df = pd.DataFrame({
 
-            fft_raw_df = pd.DataFrame({
+                    "log10(k)":
+                        ps_fft["logk"],
 
-                "log10(k)":
-                    ps_fft["logk"],
+                    "log10(kP(k)/π)":
+                        ps_fft["logkpk"]
 
-                "log10(kP(k)/π)":
-                    ps_fft["logkpk"]
+                })
 
-            })
+                lomb_raw_df = pd.DataFrame({
 
-            lomb_raw_df = pd.DataFrame({
+                    "log10(k)":
+                        ps_lomb["logk"],
 
-                "log10(k)":
-                    ps_lomb["logk"],
+                    "log10(kP(k)/π)":
+                        ps_lomb["logkpk"]
 
-                "log10(kP(k)/π)":
-                    ps_lomb["logkpk"]
+                })
 
-            })
+                col1, col2 = st.columns(2)
 
-            col1, col2 = st.columns(2)
+                with col1:
 
-            with col1:
+                    st.markdown("### FFT Raw")
 
-                st.markdown("### FFT Raw")
+                    st.dataframe(
 
-                st.dataframe(
+                        fft_raw_df,
 
-                    fft_raw_df,
+                        height=300,
 
-                    height=300,
+                        use_container_width=True
 
-                    use_container_width=True
+                    )
 
-                )
+                with col2:
 
-            with col2:
+                    st.markdown("### Lomb-Scargle Raw")
 
-                st.markdown("### Lomb-Scargle Raw")
+                    st.dataframe(
 
-                st.dataframe(
+                        lomb_raw_df,
 
-                    lomb_raw_df,
+                        height=300,
 
-                    height=300,
+                        use_container_width=True
 
-                    use_container_width=True
+                    )
 
-                )
+                #==================================================
+                # Binned Data Tables
+                #==================================================
 
-            #==================================================
-            # Binned Data Tables
-            #==================================================
+                st.subheader("Binned Power Spectrum Tables")
 
-            st.subheader("Binned Power Spectrum Tables")
+                fft_bin_df = pd.DataFrame({
 
-            fft_bin_df = pd.DataFrame({
+                    "log10(k)":
+                        ps_fft["logk_bin"],
 
-                "log10(k)":
-                    ps_fft["logk_bin"],
+                    "log10(kP(k)/π)":
+                        ps_fft["logpk_bin"],
 
-                "log10(kP(k)/π)":
-                    ps_fft["logpk_bin"],
+                    "σ":
+                        ps_fft["logpk_err"]
 
-                "σ":
-                    ps_fft["logpk_err"]
+                })
 
-            })
+                lomb_bin_df = pd.DataFrame({
 
-            lomb_bin_df = pd.DataFrame({
+                    "log10(k)":
+                        ps_lomb["logk_bin"],
 
-                "log10(k)":
-                    ps_lomb["logk_bin"],
+                    "log10(kP(k)/π)":
+                        ps_lomb["logpk_bin"],
 
-                "log10(kP(k)/π)":
-                    ps_lomb["logpk_bin"],
+                    "σ":
+                        ps_lomb["logpk_err"]
 
-                "σ":
-                    ps_lomb["logpk_err"]
+                })
 
-            })
+                col1, col2 = st.columns(2)
 
-            col1, col2 = st.columns(2)
+                with col1:
 
-            with col1:
+                    st.markdown("### FFT Binned")
 
-                st.markdown("### FFT Binned")
+                    st.dataframe(
 
-                st.dataframe(
+                        fft_bin_df,
 
-                    fft_bin_df,
+                        use_container_width=True
 
-                    use_container_width=True
+                    )
 
-                )
+                with col2:
 
-            with col2:
+                    st.markdown("### Lomb-Scargle Binned")
 
-                st.markdown("### Lomb-Scargle Binned")
+                    st.dataframe(
 
-                st.dataframe(
+                        lomb_bin_df,
 
-                    lomb_bin_df,
+                        use_container_width=True
 
-                    use_container_width=True
-
-                )
+                    )
 
         #-----section 4.2.5: Rolling Mean Diagnostics
 
         if ps_lomb is not None:
 
-            st.subheader(
-                "Rolling Mean Normalization Diagnostics"
-            )
+             with st.expander("Rolling Mean Normalization Diagnostics"):
 
-            #==================================================
-            # Plot A : Flux and Rolling Mean
-            #==================================================
+                #==================================================
+                # Plot A : Flux and Rolling Mean
+                #==================================================
 
-            st.markdown(
-                "#### Forest Flux and Rolling Mean"
-            )
+                st.markdown(
+                    "#### Forest Flux and Rolling Mean"
+                )
 
-            fig_roll = go.Figure()
+                fig_roll = go.Figure()
 
-            fig_roll.add_trace(
+                fig_roll.add_trace(
 
-                go.Scatter(
+                    go.Scatter(
 
-                    x=ps_lomb["wave_rest"],
+                        x=ps_lomb["wave_rest"],
 
-                    y=ps_lomb["flux_forest"],
+                        y=ps_lomb["flux_forest"],
 
-                    mode="lines",
+                        mode="lines",
 
-                    name="Flux"
+                        name="Flux"
+
+                    )
+                )
+
+                fig_roll.add_trace(
+
+                    go.Scatter(
+
+                        x=ps_lomb["wave_rest"],
+
+                        y=ps_lomb["smooth"],
+
+                        mode="lines",
+
+                        name=f"Rolling Mean ({window_size} px)"
+
+                    )
+                )
+
+                fig_roll.update_layout(
+
+                    title=(
+                        f"Flux and Rolling Mean "
+                        f"(Window = {window_size} pixels)"
+                    ),
+
+                    xaxis_title=
+                        "Rest Wavelength (Å)",
+
+                    yaxis_title=
+                        "Flux"
 
                 )
-            )
 
-            fig_roll.add_trace(
+                st.plotly_chart(
+                    fig_roll,
+                    use_container_width=True
+                )
 
-                go.Scatter(
+                #==================================================
+                # Plot B : Flux Contrast
+                #==================================================
 
-                    x=ps_lomb["wave_rest"],
+                st.markdown(
+                    "#### Rolling-Mean Normalized Flux Contrast"
+                )
 
-                    y=ps_lomb["smooth"],
+                fig_delta = go.Figure()
 
-                    mode="lines",
+                fig_delta.add_trace(
 
-                    name=f"Rolling Mean ({window_size} px)"
+                    go.Scatter(
+
+                        x=ps_lomb["wave_rest"],
+
+                        y=ps_lomb["deltaF"],
+
+                        mode="lines",
+
+                        name="δF"
+
+                    )
+                )
+
+                fig_delta.update_layout(
+
+                    title=(
+                        f"δF = Flux / Rolling Mean - 1 "
+                        f"(Window = {window_size} pixels)"
+                    ),
+
+                    xaxis_title=
+                        "Rest Wavelength (Å)",
+
+                    yaxis_title=
+                        "δF"
 
                 )
-            )
 
-            fig_roll.update_layout(
-
-                title=(
-                    f"Flux and Rolling Mean "
-                    f"(Window = {window_size} pixels)"
-                ),
-
-                xaxis_title=
-                    "Rest Wavelength (Å)",
-
-                yaxis_title=
-                    "Flux"
-
-            )
-
-            st.plotly_chart(
-                fig_roll,
-                use_container_width=True
-            )
-
-            #==================================================
-            # Plot B : Flux Contrast
-            #==================================================
-
-            st.markdown(
-                "#### Rolling-Mean Normalized Flux Contrast"
-            )
-
-            fig_delta = go.Figure()
-
-            fig_delta.add_trace(
-
-                go.Scatter(
-
-                    x=ps_lomb["wave_rest"],
-
-                    y=ps_lomb["deltaF"],
-
-                    mode="lines",
-
-                    name="δF"
-
+                st.plotly_chart(
+                    fig_delta,
+                    use_container_width=True
                 )
-            )
-
-            fig_delta.update_layout(
-
-                title=(
-                    f"δF = Flux / Rolling Mean - 1 "
-                    f"(Window = {window_size} pixels)"
-                ),
-
-                xaxis_title=
-                    "Rest Wavelength (Å)",
-
-                yaxis_title=
-                    "δF"
-
-            )
-
-            st.plotly_chart(
-                fig_delta,
-                use_container_width=True
-            )
             
         #-----section 4.2.6:Flux Spectrum
+        with st.expander("Flux Spectrum"):
+            mask = np.isfinite(flux)
 
-        mask = np.isfinite(flux)
+            fig1 = go.Figure()
 
-        fig1 = go.Figure()
+            fig1.add_trace(
 
-        fig1.add_trace(
+                go.Scatter(
 
-            go.Scatter(
+                    x=wave[mask],
 
-                x=wave[mask],
+                    y=flux[mask],
 
-                y=flux[mask],
+                    mode="lines",
 
-                mode="lines",
+                    name="Flux"))
 
-                name="Flux"))
+            fig1.update_layout(
 
-        fig1.update_layout(
+                title="Flux Spectrum",
 
-            title="Flux Spectrum",
+                xaxis_title="Observed Wavelength (Å)",
 
-            xaxis_title="Observed Wavelength (Å)",
+                yaxis_title="Flux")
 
-            yaxis_title="Flux")
+            fig1.update_yaxes(tickformat=".2e")
 
-        fig1.update_yaxes(tickformat=".2e")
-
-        st.plotly_chart(fig1,use_container_width=True)
+            st.plotly_chart(fig1,use_container_width=True)
             
         #-----section 4.2.7:Signal-to-Noise Plot
 
