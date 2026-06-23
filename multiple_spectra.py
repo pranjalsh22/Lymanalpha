@@ -1,60 +1,13 @@
-#----section 1: imports config and dataset folder-------------
+#version 4
 
+#----section 1: imports config and dataset folder-------------
 import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 from astropy.io import fits
 import plotly.graph_objects as go
-import plotly.io as pio
-
-pio.templates["astrophysics"] = dict(
-    layout=dict(
-
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-
-        font=dict(
-            family="Times New Roman",
-            size=16,
-            color="black"),
-
-        title=dict(
-            font=dict(
-                size=22,
-                color="black")),
-
-        xaxis=dict(
-            showline=True,
-            linecolor="black",
-            linewidth=1.5,
-            mirror=True,
-            tickfont=dict(
-                color="black",
-                size=14),
-            title_font=dict(
-                color="black",
-                size=18),
-            gridcolor="#d9d9d9"
-        ),
-
-        yaxis=dict(
-            showline=True,
-            linecolor="black",
-            linewidth=1.5,
-            mirror=True,
-            tickfont=dict(
-                color="black",
-                size=14),
-            title_font=dict(
-                color="black",
-                size=18),
-            gridcolor="#d9d9d9"),
-
-        legend=dict(font=dict(color="black",size=14))))
-
-pio.templates.default = "astrophysics"
-
+from astropy.timeseries import LombScargle
 
 st.set_page_config(
     page_title=".fit file plots",
@@ -265,7 +218,7 @@ def boera_quantity(k,pk):
 
 #---- section 2.14: master power spectrum function
 
-def lya_power_spectrum(wave_obs,flux,error,z):
+def lya_power_spectrum_fft(wave_obs,flux,error,z):
 
     wave_rest, flux_forest = (extract_lya_forest(wave_obs,flux,error,z))
 
@@ -333,20 +286,301 @@ def bin_power_spectrum(k, pk, n_bins=20):
 
     for i in range(n_bins):
 
-        m = ((logk >= bins[i]) &(logk < bins[i + 1]))
+        m = ((logk >= bins[i])&(logk < bins[i + 1]))
+
+        if np.sum(m) == 0:
+            continue
 
         k_bin.append(np.mean(logk[m]))
 
-        pk_values = (k[m]*pk[m] /np.pi)
+        pk_values = (k[m] * pk[m] / np.pi)
 
-        pk_bin.append(np.log10(np.mean(pk_values)))
+        pk_bin.append(
+            np.log10(
+                np.mean(pk_values)
+            )
+        )
 
-        pk_err.append(np.std(np.log10(pk_values)))
-
+        pk_err.append(
+            np.std(
+                np.log10(pk_values)
+            )
+        )
     return (np.array(k_bin),np.array(pk_bin),np.array(pk_err))
 
+def rolling_mean_flux(
+    flux,
+    window=301
+):
 
+    smooth = (
+        pd.Series(flux)
+        .rolling(
+            window=window,
+            center=True,
+            min_periods=1
+        )
+        .mean()
+        .to_numpy()
+    )
+
+    return smooth
+
+def flux_contrast_rolling(flux_forest):
+
+
+    smooth = rolling_mean_flux(
+    flux_forest,
+    window=window_size
+)
+
+    deltaF = (
+        flux_forest /
+        smooth
+    ) - 1
+
+    return (
+        smooth,
+        deltaF
+    )
+
+
+def extract_lya_forest_lomb(
+    wave_obs,
+    flux,
+    error,
+    z,
+    rest_min=1040,
+    rest_max=1180
+):
+
+    wave_rest = (
+        wave_obs /
+        (1+z)
+    )
+
+    forest = (
+        (wave_rest >= rest_min)
+        &
+        (wave_rest <= rest_max)
+    )
+
+    good = (
+        np.isfinite(flux)
+        &
+        np.isfinite(error)
+        &
+        (error > 0)
+    )
+
+    return (
+        wave_rest[forest],
+        flux[forest],
+        good[forest]
+    )
+
+
+def lya_power_spectrum_lomb(
+    wave_obs,
+    flux,
+    error,
+    z):
+
+    #---------------------------------------
+    # Forest extraction
+    #---------------------------------------
+
+    wave_rest = wave_obs / (1 + z)
+
+    forest = (
+        (wave_rest >= 1040)
+        &
+        (wave_rest <= 1180)
+    )
+
+    if np.sum(forest) < 10:
+        return None
+
+    wave_rest = wave_rest[forest]
+
+    flux_forest = flux[forest]
+
+    error_forest = error[forest]
+
+    #---------------------------------------
+    # Velocity coordinate
+    #---------------------------------------
+
+    velocity, dv_forest = velocity_grid(
+        wave_rest
+    )
+
+    #---------------------------------------
+    # Rolling mean normalization
+    #---------------------------------------
+
+    smooth, deltaF = (
+        flux_contrast_rolling(
+            flux_forest
+        )
+    )
+
+    good = (
+        np.isfinite(flux_forest)
+        &
+        np.isfinite(error_forest)
+        &
+        (error_forest > 0)
+        &
+        np.isfinite(smooth)
+        &
+        (smooth != 0)
+    )
+
+    if np.sum(good) < 10:
+        return None
+
+    #---------------------------------------
+    # Keep true velocity positions
+    #---------------------------------------
+
+    velocity_valid = velocity[good]
+
+    deltaF_valid = deltaF[good]
+
+    #---------------------------------------
+    # k grid
+    #---------------------------------------
+
+    N = len(deltaF_valid)
+
+    k = compute_k(
+        N,
+        dv_forest
+    )
+
+    k = k[1:]
+
+    #---------------------------------------
+    # Lomb Scargle
+    #---------------------------------------
+
+    frequency = (
+        k /
+        (2 * np.pi)
+    )
+
+    ls = LombScargle(
+        velocity_valid,
+        deltaF_valid,
+        normalization="psd"
+    )
+
+    pk = ls.power(
+        frequency
+    )
+
+    #---------------------------------------
+    # Boera quantities
+    #---------------------------------------
+
+    logk, logkpk = (
+        boera_quantity(
+            k,
+            pk
+        )
+    )
+
+    (
+        logk_bin,
+        logpk_bin,
+        logpk_err
+    ) = bin_power_spectrum(
+        k,
+        pk
+    )
+   
+    #---------------------------------------
+    # Return
+    #---------------------------------------
+
+    return {
+
+        "wave_rest":
+            wave_rest,
+
+        "flux_forest":
+            flux_forest,
+
+        "smooth":
+            smooth,
+
+        "deltaF":
+            deltaF,
+
+        "velocity":
+            velocity,
+
+        "dv_forest":
+            dv_forest,
+
+        "k":
+            k,
+
+        "pk":
+            pk,
+
+        "logk":
+            logk,
+
+        "logkpk":
+            logkpk,
+
+        "logk_bin":
+            logk_bin,
+
+        "logpk_bin":
+            logpk_bin,
+
+        "logpk_err":
+            logpk_err,
+
+        "n_good":
+            np.sum(good),
+        "window_size":
+        window_size
+
+    }
+
+def plotly_download_config(
+    quasar_name,
+    graph_name
+):
+
+    return {
+
+        "toImageButtonOptions": {
+
+            "format": "png",
+
+            "filename":
+                f"{quasar_name}_{graph_name}",
+
+            "height": 800,
+
+            "width": 1200,
+
+            "scale": 2
+        }
+    }
 #------ Section 3:Setting up the data------------------------------------ 
+
+window_size = st.sidebar.slider(
+    "Rolling Mean Window",
+    min_value=51,
+    max_value=1001,
+    value=301,
+    step=50)
 
 pairs = find_pairs(SPEC_DIR)
 
@@ -379,54 +613,38 @@ for key, files in pairs.items():
 
         z = redshifts[key]
 
-        ps = lya_power_spectrum(wave,flux,error,z)
+        ps_fft = (lya_power_spectrum_fft(wave,flux,error,z))
+
+        ps_lomb = (lya_power_spectrum_lomb(wave,flux,error,z))
 
         dv = velocity_spacing(header)
 
         spectra.append({
 
             "object": object_name,
-
             "z": z,
-
             "instrument": instrument,
-
             "wave": wave,
-
             "flux": flux,
-
             "error": error,
-
             "snr": snr,
-
             "header": header,
-
             "median_snr": median_snr,
-
             "masked_fraction": masked_fraction,
-
             "dv": dv,
-
-            "ps": ps})
+            "ps_fft": ps_fft,
+            "ps_lomb": ps_lomb})
 
         summary_rows.append({
 
             "Object": object_name,
-
             "z": z,
-
             "Instrument": instrument,
-
             "Pixels": len(flux),
-
             "Lambda Min": wave.min(),
-
             "Lambda Max": wave.max(),
-
             "Median S/N": median_snr,
-
             "Masked %": masked_fraction,
-
             "dv (km/s)": dv})
 
     except Exception as e:
@@ -436,49 +654,45 @@ for key, files in pairs.items():
         
 #-----section 4.1
 
-st.title("Quasar Spectra")
-
+st.title("Power spectrum")
 summary_df = pd.DataFrame(summary_rows)
-
 st.header("Dataset Summary")
-
 st.dataframe(summary_df,use_container_width=True)
-
 st.header("Individual Spectra")
 
 #-----section 4.2: Loop Through Spectra
-for spec in spectra:
 
+for spec in spectra:
     with st.expander(f"{spec['object']} ({spec['instrument']})",expanded=False):
 
         #-----section 4.2.1: Extract Stored Data
 
         flux = spec["flux"]
-
         error = spec["error"]
-
         wave = spec["wave"]
-
         snr = spec["snr"]
-
-        ps = spec["ps"]
-
+        ps_fft = spec["ps_fft"]
+        ps_lomb = spec["ps_lomb"]
+        
+        if ps_lomb is not None:
+            window_size = ps_lomb["window_size"]
+            
         #-----section 4.2.2: Basic Statistics:
+            
         finite_pixels = int(np.sum(np.isfinite(flux)))
-
         masked_pixels = int(np.sum(~np.isfinite(flux)))
-
+        
         c1, c2, c3, c4, c5 = st.columns(5)
 
-        c1.metric("Median S/N",f"{spec['median_snr']:.6e}")
+        c1.metric("Median S/N",f"{spec['median_snr']:.3e}")
 
         c2.metric("Quality",quality_label(spec["median_snr"]))
 
-        c3.metric("Masked %",f"{spec['masked_fraction']:.6e}")
+        c3.metric("Masked %",f"{spec['masked_fraction']:.3e}")
 
-        c4.metric("Velocity Spacing",f"{spec['dv']:.6e}")
+        c4.metric("Velocity Spacing",f"{spec['dv']:.3e}")
 
-        c5.metric("Redshift",f"{spec['z']:.6e}")
+        c5.metric("Redshift",f"{spec['z']:.3e}")
 
         st.write(f"Pixels: {len(flux)}")
 
@@ -493,121 +707,429 @@ for spec in spectra:
             f"{wave.max():.1f} Å")
 
         #-----section 4.2.3: Lyα Forest Diagnostics
-        if ps is not None:
+        if (ps_fft is not None and ps_lomb is not None):
 
-            st.subheader("Lyα Forest Diagnostics")
+            col1, col2 = st.columns(2)
 
-            st.write(f"Forest Pixels: "
-                f"{len(ps['deltaF'])}")
+            with col1:
+                F1,F2=st.columns(2)
+                st.markdown("### Using FFT")
+                st.metric("Forest Pixels",len(ps_fft["deltaF"]))
+                st.metric("Mean Flux",f"{ps_fft['Fmean']:.3e}")
 
-            st.write(f"Mean Flux <F>: "
-                f"{ps['Fmean']:.6e}")
-
-            st.write(f"Forest dv: "
-                f"{ps['dv_forest']:.6e} km/s")
-
-            st.write(
-                f"k range: "
-                f"{ps['k'][1]:.4e}"
-                f" to "
-                f"{ps['k'][-1]:.4e}")
+            with col2:
+                st.write("")
+                st.markdown("### Using Lomb-Scargle Periodogram")
+                st.metric("Good Pixels",ps_lomb["n_good"])
+                st.metric("Forest dv",f"{ps_lomb['dv_forest']:.2f}")
         
         #-----section 4.2.4: Lyα Power Spectrum Plot
-        #Part A
-        if ps is not None:
+        
+        if (ps_fft is not None and ps_lomb is not None ):
 
-            fig_ps = go.Figure()
+            #st.subheader("Lyα Forest Power Spectrum")
 
-            fig_ps.add_trace(
+            #==================================================
+            #A) Raw Power Spectra
+            #==================================================
+            st.subheader("A) Raw Power Spectra:")
+            col1, col2 = st.columns(2)
+
+            with col1:
+                fig_fft = go.Figure()
+                fig_fft.add_trace(
+                    go.Scatter(x=ps_fft["logk"],y=ps_fft["logkpk"],mode="lines",name="FFT"))
+                fig_fft.update_layout(
+                    
+                    title="FFT Power Spectrum",
+                    xaxis_title="log₁₀(k / km⁻¹ s)",
+                    yaxis_title="log₁₀(kP(k)/π)")
+
+                st.plotly_chart(
+                    fig_fft,
+                    use_container_width=True,
+                    config=plotly_download_config(spec["object"],"FFTPowerSpectrum"))
+
+            with col2:
+
+                fig_lomb = go.Figure()
+
+                fig_lomb.add_trace(
+                    go.Scatter(x=ps_lomb["logk"],y=ps_lomb["logkpk"],mode="lines",name="Lomb-Scargle"))
+
+            
+                fig_lomb.update_layout(
+
+                    title=(
+                        f"Lomb-Scargle Power Spectrum "
+                        f"(Window={window_size}, "
+                        f"Bins=20)"),
+
+                    xaxis_title="log₁₀(k / km⁻¹ s)",
+
+                    yaxis_title="log₁₀(kP(k)/π)")
+
+                st.plotly_chart(
+                    fig_lomb,
+                    use_container_width=True,
+                    config=plotly_download_config(spec["object"],"LombScarglePowerSpectrum"))
+                
+
+            #==================================================
+            #B) Binned Power Spectra
+            #==================================================
+            st.subheader("B) Binned Power Spectra")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                fig_fft_bin = go.Figure()
+
+                fig_fft_bin.add_trace(
+
+                    go.Scatter(
+
+                        x=ps_fft["logk_bin"],
+
+                        y=ps_fft["logpk_bin"],
+
+                        mode="markers+lines",
+
+                        error_y=dict(
+                            type="data",
+                            array=ps_fft["logpk_err"],
+                            visible=True),
+
+                        name="FFT Binned"))
+
+                fig_fft_bin.update_layout(
+
+                    title="FFT Binned Power Spectrum",
+
+                    xaxis_title="log₁₀(k / km⁻¹ s)",
+
+                    yaxis_title="log₁₀(kP(k)/π)")
+
+                st.plotly_chart(
+                    fig_fft_bin,
+                    use_container_width=True,
+                    config=plotly_download_config(spec["object"],"FFT_Binned_PowerSpectrum"))
+
+            with col2:
+
+                fig_lomb_bin = go.Figure()
+
+                fig_lomb_bin.add_trace(
+
+                    go.Scatter(
+
+                        x=ps_lomb["logk_bin"],
+
+                        y=ps_lomb["logpk_bin"],
+
+                        mode="markers+lines",
+
+                        error_y=dict(
+
+                            type="data",
+
+                            array=ps_lomb["logpk_err"],
+
+                            visible=True),
+
+                        name="Lomb Binned"))
+
+                
+                fig_lomb_bin.update_layout(
+
+                        title=(
+                            f"Lomb-Scargle Binned Power Spectrum "
+                            f"(Window={window_size}, "
+                            f"Bins=20)"),
+
+                        xaxis_title="log₁₀(k / km⁻¹ s)",
+
+                        yaxis_title="log₁₀(kP(k)/π)")
+
+                st.plotly_chart(
+                    fig_lomb_bin,
+                    use_container_width=True,
+                    config=plotly_download_config(spec["object"],"LombScargle_binned_PowerSpectrum"))
+
+            #==================================================
+            #C) FFT vs Lomb Comparison
+            #==================================================
+
+            st.subheader("C) FFT vs Lomb-Scargle Comparison")
+
+            fig_compare = go.Figure()
+
+            fig_compare.add_trace(
+
+                go.Scatter(
+                    x=ps_fft["logk_bin"],
+
+                    y=ps_fft["logpk_bin"],
+                    
+                    mode="lines",
+
+                    name="FFT"
+
+                )
+            )
+
+            fig_compare.add_trace(
 
                 go.Scatter(
 
-                    x=ps["logk"],
+                    x=ps_lomb["logk_bin"],
 
-                    y=ps["logkpk"],
+                    y=ps_lomb["logpk_bin"],
+
 
                     mode="lines",
 
-                    name="log(kP(k)/π)"))
+                    name="Lomb-Scargle"))
 
-            fig_ps.update_layout(
+            fig_compare.update_layout(
 
-                title="Lyα Forest Power Spectrum",
+                title=f"FFT(Global Mean) vs Lomb-Scargle (Rolling Mean: Window={window_size},Bins=20)",
 
                 xaxis_title="log₁₀(k / km⁻¹ s)",
 
                 yaxis_title="log₁₀(kP(k)/π)")
 
-            st.plotly_chart(fig_ps,use_container_width=True)
-        #Part B
-        if ps is not None:
-
-            fig_binned = go.Figure()
-
-            fig_binned.add_trace(
-
-                go.Scatter(
-
-                    x=ps["logk_bin"],
-
-                    y=ps["logpk_bin"],
-
-                    mode="markers+lines",
-
-                    error_y=dict(
-                        type="data",
-                        array=ps["logpk_err"],
-                        visible=True
-                    ),
-
-                    name="Binned Power"
-                )
-            )
-
-            fig_binned.update_layout(
-
-                title=
-                "Binned Lyα Forest Power Spectrum",
-
-                xaxis_title=
-                "log₁₀(k / km⁻¹ s)",
-
-                yaxis_title=
-                "log₁₀(kP(k)/π)"
-            )
-
             st.plotly_chart(
-                fig_binned,
-                use_container_width=True)
-        #-----section 4.2.5: Flux Contrast Plot
+                fig_compare,
+                use_container_width=True,
+                    config=plotly_download_config(spec["object"],"FFT_vs_LombScarglePowerSpectrum"))
+            #==================================================
+            # Raw Data Tables
+            #==================================================
 
-        if ps is not None:
+            st.subheader("Raw Power Spectrum Tables")
 
-            fig_forest = go.Figure()
+            fft_raw_df = pd.DataFrame({
 
-            fig_forest.add_trace(
+                "log10(k)":
+                    ps_fft["logk"],
+
+                "log10(kP(k)/π)":
+                    ps_fft["logkpk"]
+
+            })
+
+            lomb_raw_df = pd.DataFrame({
+
+                "log10(k)":
+                    ps_lomb["logk"],
+
+                "log10(kP(k)/π)":
+                    ps_lomb["logkpk"]
+
+            })
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.markdown("### FFT Raw")
+
+                st.dataframe(
+
+                    fft_raw_df,
+
+                    height=300,
+
+                    use_container_width=True
+
+                )
+
+            with col2:
+
+                st.markdown("### Lomb-Scargle Raw")
+
+                st.dataframe(
+
+                    lomb_raw_df,
+
+                    height=300,
+
+                    use_container_width=True
+
+                )
+
+            #==================================================
+            # Binned Data Tables
+            #==================================================
+
+            st.subheader("Binned Power Spectrum Tables")
+
+            fft_bin_df = pd.DataFrame({
+
+                "log10(k)":
+                    ps_fft["logk_bin"],
+
+                "log10(kP(k)/π)":
+                    ps_fft["logpk_bin"],
+
+                "σ":
+                    ps_fft["logpk_err"]
+
+            })
+
+            lomb_bin_df = pd.DataFrame({
+
+                "log10(k)":
+                    ps_lomb["logk_bin"],
+
+                "log10(kP(k)/π)":
+                    ps_lomb["logpk_bin"],
+
+                "σ":
+                    ps_lomb["logpk_err"]
+
+            })
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.markdown("### FFT Binned")
+
+                st.dataframe(
+
+                    fft_bin_df,
+
+                    use_container_width=True
+
+                )
+
+            with col2:
+
+                st.markdown("### Lomb-Scargle Binned")
+
+                st.dataframe(
+
+                    lomb_bin_df,
+
+                    use_container_width=True
+
+                )
+
+        #-----section 4.2.5: Rolling Mean Diagnostics
+
+        if ps_lomb is not None:
+
+            st.subheader(
+                "Rolling Mean Normalization Diagnostics"
+            )
+
+            #==================================================
+            # Plot A : Flux and Rolling Mean
+            #==================================================
+
+            st.markdown(
+                "#### Forest Flux and Rolling Mean"
+            )
+
+            fig_roll = go.Figure()
+
+            fig_roll.add_trace(
 
                 go.Scatter(
 
-                    x=ps["wave_rest"],
+                    x=ps_lomb["wave_rest"],
 
-                    y=ps["deltaF"],
+                    y=ps_lomb["flux_forest"],
 
                     mode="lines",
 
-                    name="δF"))
+                    name="Flux"
 
-            fig_forest.update_layout(
+                )
+            )
 
-                title=
-                "Lyα Forest Flux Contrast",
+            fig_roll.add_trace(
+
+                go.Scatter(
+
+                    x=ps_lomb["wave_rest"],
+
+                    y=ps_lomb["smooth"],
+
+                    mode="lines",
+
+                    name=f"Rolling Mean ({window_size} px)"
+
+                )
+            )
+
+            fig_roll.update_layout(
+
+                title=(
+                    f"Flux and Rolling Mean "
+                    f"(Window = {window_size} pixels)"
+                ),
 
                 xaxis_title=
-                "Rest Wavelength (Å)",
+                    "Rest Wavelength (Å)",
 
-                yaxis_title="δF")
+                yaxis_title=
+                    "Flux"
 
-            st.plotly_chart(fig_forest,use_container_width=True)
+            )
+
+            st.plotly_chart(
+                fig_roll,
+                use_container_width=True
+            )
+
+            #==================================================
+            # Plot B : Flux Contrast
+            #==================================================
+
+            st.markdown(
+                "#### Rolling-Mean Normalized Flux Contrast"
+            )
+
+            fig_delta = go.Figure()
+
+            fig_delta.add_trace(
+
+                go.Scatter(
+
+                    x=ps_lomb["wave_rest"],
+
+                    y=ps_lomb["deltaF"],
+
+                    mode="lines",
+
+                    name="δF"
+
+                )
+            )
+
+            fig_delta.update_layout(
+
+                title=(
+                    f"δF = Flux / Rolling Mean - 1 "
+                    f"(Window = {window_size} pixels)"
+                ),
+
+                xaxis_title=
+                    "Rest Wavelength (Å)",
+
+                yaxis_title=
+                    "δF"
+
+            )
+
+            st.plotly_chart(
+                fig_delta,
+                use_container_width=True
+            )
             
         #-----section 4.2.6:Flux Spectrum
 
