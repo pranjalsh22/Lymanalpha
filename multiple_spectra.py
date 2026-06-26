@@ -125,33 +125,16 @@ def snr_calculations(n,header,flux,error):
 def extract_lya_forest(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
 
     wave_rest = (wave_obs/ (1 + z))
-
     good_flux = np.isfinite(flux)
-
-    good_error = (
-        np.isfinite(error)
-        &
-        (error > 0)
-    )
-
-    mask = (
-        (wave_rest >= rest_min)
-        &
-        (wave_rest <= rest_max)
-        &
-        good_flux
-        &
-        good_error
-    )
+    good_error = (np.isfinite(error) & (error > 0))
+    mask = ((wave_rest >= rest_min) & (wave_rest <= rest_max) & good_flux & good_error)
     return (wave_rest[mask],flux[mask])
 
 #---section 2.8: flux_contrast--------------------------------
 
 def flux_contrast(flux_forest):
-
     if len(flux_forest) < 10:
         return None, None
-
     Fmean = np.nanmean(flux_forest)
 
     if not np.isfinite(Fmean):
@@ -169,11 +152,8 @@ def flux_contrast(flux_forest):
 def velocity_grid(wave_rest):
 
     c = 299792.458
-
     velocity = (c* np.log(wave_rest))
-
     dv = np.median(np.diff(velocity))
-
     return (velocity,dv)
 
 #---- section 2.10:FFT------------
@@ -244,25 +224,15 @@ def lya_power_spectrum_fft(wave_obs,flux,error,z):
     return {
 
         "wave_rest": wave_rest,
-
         "flux_forest": flux_forest,
-
         "Fmean": Fmean,
-
         "deltaF": deltaF,
-
         "velocity": velocity,
-
         "dv_forest": dv_forest,
-
         "fft": fft_vals,
-
         "k": k,
-
         "pk": pk,
-
         "logk": logk,
-
         "logkpk": logkpk,
         "logk_bin": logk_bin,
         "logpk_bin": logpk_bin,
@@ -295,96 +265,30 @@ def bin_power_spectrum(k, pk, n_bins=20):
 
         pk_values = (k[m] * pk[m] / np.pi)
 
-        pk_bin.append(
-            np.log10(
-                np.mean(pk_values)
-            )
-        )
+        pk_bin.append(np.log10(np.mean(pk_values)))
 
-        pk_err.append(
-            np.std(
-                np.log10(pk_values)
-            )
-        )
+        pk_err.append(np.std(np.log10(pk_values)))
     return (np.array(k_bin),np.array(pk_bin),np.array(pk_err))
 
-def rolling_mean_flux(
-    flux,
-    window=301
-):
+def rolling_mean_flux(flux,window=301):
 
-    smooth = (
-        pd.Series(flux)
-        .rolling(
-            window=window,
-            center=True,
-            min_periods=1
-        )
-        .mean()
-        .to_numpy()
-    )
-
+    smooth = (pd.Series(flux).rolling(window=window,center=True,min_periods=1).mean().to_numpy())
     return smooth
 
 def flux_contrast_rolling(flux_forest):
+    smooth = rolling_mean_flux(flux_forest,window=window_size)
+    deltaF = (flux_forest /smooth) - 1
+    return (smooth,deltaF)
+
+def extract_lya_forest_lomb(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
+
+    wave_rest = (wave_obs /(1+z))
+    forest = ((wave_rest >= rest_min) & (wave_rest <= rest_max))
+    good = (np.isfinite(flux) & np.isfinite(error) & (error > 0))
+    return (wave_rest[forest],flux[forest],good[forest])
 
 
-    smooth = rolling_mean_flux(
-    flux_forest,
-    window=window_size
-)
-
-    deltaF = (
-        flux_forest /
-        smooth
-    ) - 1
-
-    return (
-        smooth,
-        deltaF
-    )
-
-
-def extract_lya_forest_lomb(
-    wave_obs,
-    flux,
-    error,
-    z,
-    rest_min=1040,
-    rest_max=1180
-):
-
-    wave_rest = (
-        wave_obs /
-        (1+z)
-    )
-
-    forest = (
-        (wave_rest >= rest_min)
-        &
-        (wave_rest <= rest_max)
-    )
-
-    good = (
-        np.isfinite(flux)
-        &
-        np.isfinite(error)
-        &
-        (error > 0)
-    )
-
-    return (
-        wave_rest[forest],
-        flux[forest],
-        good[forest]
-    )
-
-
-def lya_power_spectrum_lomb(
-    wave_obs,
-    flux,
-    error,
-    z):
+def lya_power_spectrum_lomb(wave_obs,flux,error,z):
 
     #---------------------------------------
     # Forest extraction
@@ -392,50 +296,28 @@ def lya_power_spectrum_lomb(
 
     wave_rest = wave_obs / (1 + z)
 
-    forest = (
-        (wave_rest >= 1040)
-        &
-        (wave_rest <= 1180)
-    )
+    forest = ((wave_rest >= 1040) & (wave_rest <= 1180))
 
     if np.sum(forest) < 10:
         return None
 
     wave_rest = wave_rest[forest]
-
     flux_forest = flux[forest]
-
     error_forest = error[forest]
 
     #---------------------------------------
     # Velocity coordinate
     #---------------------------------------
 
-    velocity, dv_forest = velocity_grid(
-        wave_rest
-    )
+    velocity, dv_forest = velocity_grid(wave_rest)
 
     #---------------------------------------
     # Rolling mean normalization
     #---------------------------------------
 
-    smooth, deltaF = (
-        flux_contrast_rolling(
-            flux_forest
-        )
-    )
+    smooth, deltaF = (flux_contrast_rolling(flux_forest))
 
-    good = (
-        np.isfinite(flux_forest)
-        &
-        np.isfinite(error_forest)
-        &
-        (error_forest > 0)
-        &
-        np.isfinite(smooth)
-        &
-        (smooth != 0)
-    )
+    good = (np.isfinite(flux_forest)&np.isfinite(error_forest)&(error_forest > 0)&np.isfinite(smooth)&(smooth != 0))
 
     if np.sum(good) < 10:
         return None
@@ -445,7 +327,6 @@ def lya_power_spectrum_lomb(
     #---------------------------------------
 
     velocity_valid = velocity[good]
-
     deltaF_valid = deltaF[good]
 
     #---------------------------------------
@@ -453,11 +334,7 @@ def lya_power_spectrum_lomb(
     #---------------------------------------
 
     N = len(deltaF_valid)
-
-    k = compute_k(
-        N,
-        dv_forest
-    )
+    k = compute_k(N,dv_forest)
 
     k = k[1:]
 
@@ -465,32 +342,15 @@ def lya_power_spectrum_lomb(
     # Lomb Scargle
     #---------------------------------------
 
-    frequency = (
-        k /
-        (2 * np.pi)
-    )
-
-    ls = LombScargle(
-        velocity_valid,
-        deltaF_valid,
-        normalization="psd"
-    )
-
-    pk = ls.power(
-        frequency
-    )
+    frequency = (k /(2 * np.pi))
+    ls = LombScargle(velocity_valid,deltaF_valid,normalization="psd")
+    pk = ls.power(frequency)
 
     #---------------------------------------
     # Boera quantities
     #---------------------------------------
 
-    logk, logkpk = (
-        boera_quantity(
-            k,
-            pk
-        )
-    )
-
+    logk, logkpk = (boera_quantity(k,pk))
     (
         logk_bin,
         logpk_bin,
