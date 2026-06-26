@@ -351,136 +351,64 @@ def lya_power_spectrum_lomb(wave_obs,flux,error,z):
     #---------------------------------------
 
     logk, logkpk = (boera_quantity(k,pk))
-    (
-        logk_bin,
-        logpk_bin,
-        logpk_err
-    ) = bin_power_spectrum(
-        k,
-        pk
-    )
+    (logk_bin,logpk_bin,logpk_err) = bin_power_spectrum(k,pk)
    
     #---------------------------------------
     # Return
     #---------------------------------------
 
     return {
+        "wave_rest":wave_rest,
+        "flux_forest":flux_forest,
+        "smooth":smooth,
+        "deltaF":deltaF,
+        "velocity":velocity,
+        "dv_forest":dv_forest,
+        "k":k,
+        "pk":pk,
+        "logk":logk,
+        "logkpk":logkpk,
+        "logk_bin":logk_bin,
+        "logpk_bin":logpk_bin,
+        "logpk_err":logpk_err,
+        "n_good":np.sum(good),
+        "window_size":window_size}
 
-        "wave_rest":
-            wave_rest,
+def plotly_download_config(quasar_name,graph_name):
 
-        "flux_forest":
-            flux_forest,
-
-        "smooth":
-            smooth,
-
-        "deltaF":
-            deltaF,
-
-        "velocity":
-            velocity,
-
-        "dv_forest":
-            dv_forest,
-
-        "k":
-            k,
-
-        "pk":
-            pk,
-
-        "logk":
-            logk,
-
-        "logkpk":
-            logkpk,
-
-        "logk_bin":
-            logk_bin,
-
-        "logpk_bin":
-            logpk_bin,
-
-        "logpk_err":
-            logpk_err,
-
-        "n_good":
-            np.sum(good),
-        "window_size":
-        window_size
-
-    }
-
-def plotly_download_config(
-    quasar_name,
-    graph_name
-):
-
-    return {
-
-        "toImageButtonOptions": {
-
-            "format": "png",
-
-            "filename":
-                f"{quasar_name}_{graph_name}",
-
-            "height": 800,
-
+    return {"toImageButtonOptions": {
+ 		   	"format": "png",
+   		    "filename":f"{quasar_name}_{graph_name}",
+        	"height": 800,
             "width": 1200,
-
-            "scale": 2
-        }
-    }
+            "scale": 2}}
+            
 #------ Section 3:Setting up the data------------------------------------ 
 
-window_size = st.sidebar.slider(
-    "Rolling Mean Window",
-    min_value=51,
-    max_value=1001,
-    value=301,
-    step=50)
+window_size = st.sidebar.slider("Rolling Mean Window",min_value=51,max_value=1001,value=301,step=50)
 
 pairs = find_pairs(SPEC_DIR)
-
 summary_rows = []
-
 spectra = []
 
 if len(pairs) == 0:
-
     st.error(f"No matched spectra found in {SPEC_DIR}")
     st.stop()
 
 for key, files in pairs.items():
-
     try:
-
         flux, header = load_fits(files["flux"])
-
         error, _ = load_fits(files["error"])
-
         n = len(flux)
-
         wave = wavelength_array(header,n)
-
         snr, median_snr, masked_fraction = (snr_calculations(n,header,flux,error))
-
         object_name = header.get("OBJECT",key)
-
         instrument = header.get("INSTRUME","Unknown")
-
         z = redshifts[key]
-
         ps_fft = (lya_power_spectrum_fft(wave,flux,error,z))
-
         ps_lomb = (lya_power_spectrum_lomb(wave,flux,error,z))
-
         dv = velocity_spacing(header)
-
         spectra.append({
-
             "object": object_name,
             "z": z,
             "instrument": instrument,
@@ -496,7 +424,6 @@ for key, files in pairs.items():
             "ps_lomb": ps_lomb})
 
         summary_rows.append({
-
             "Object": object_name,
             "z": z,
             "Instrument": instrument,
@@ -545,32 +472,23 @@ for spec in spectra:
         c1, c2, c3, c4, c5 = st.columns(5)
 
         c1.metric("Median S/N",f"{spec['median_snr']:.3e}")
-
         c2.metric("Quality",quality_label(spec["median_snr"]))
-
         c3.metric("Masked %",f"{spec['masked_fraction']:.3e}")
-
         c4.metric("Velocity Spacing",f"{spec['dv']:.3e}")
-
         c5.metric("Redshift",f"{spec['z']:.3e}")
-
+        
         st.write(f"Pixels: {len(flux)}")
-
         st.write(f"Finite Pixels: {finite_pixels}")
-
         st.write(f"Masked Pixels: {masked_pixels}")
-
-        st.write(
-            f"Wavelength Range: "
+        st.write(f"Wavelength Range: "
             f"{wave.min():.1f}"
             f" – "
             f"{wave.max():.1f} Å")
 
         #-----section 4.2.3: Lyα Forest Diagnostics
         if (ps_fft is not None and ps_lomb is not None):
-
             col1, col2 = st.columns(2)
-
+            
             with col1:
                 F1,F2=st.columns(2)
                 st.markdown("### Using FFT")
@@ -609,15 +527,12 @@ for spec in spectra:
                     fig_fft,
                     use_container_width=True,
                     config=plotly_download_config(spec["object"],"FFTPowerSpectrum"))
-
             
-
                 fig_lomb = go.Figure()
 
                 fig_lomb.add_trace(
                     go.Scatter(x=ps_lomb["logk"],y=ps_lomb["logkpk"],mode="lines",name="Lomb-Scargle"))
 
-            
                 fig_lomb.update_layout(
 
                     title=(
@@ -626,7 +541,6 @@ for spec in spectra:
                         f"Bins=20)"),
 
                     xaxis_title="log₁₀(k / km⁻¹ s)",
-
                     yaxis_title="log₁₀(kP(k)/π)")
 
                 st.plotly_chart(
@@ -645,26 +559,17 @@ for spec in spectra:
                 fig_fft_bin.add_trace(
 
                     go.Scatter(
-
                         x=ps_fft["logk_bin"],
-
                         y=ps_fft["logpk_bin"],
-
                         mode="markers+lines",
-
-                        error_y=dict(
-                            type="data",
-                            array=ps_fft["logpk_err"],
-                            visible=True),
-
+                        error_y=dict(type="data",
+                        array=ps_fft["logpk_err"],
+                        visible=True),
                         name="FFT Binned"))
 
                 fig_fft_bin.update_layout(
-
                     title="FFT Binned Power Spectrum",
-
                     xaxis_title="log₁₀(k / km⁻¹ s)",
-
                     yaxis_title="log₁₀(kP(k)/π)")
 
                 st.plotly_chart(
@@ -672,39 +577,23 @@ for spec in spectra:
                     use_container_width=True,
                     config=plotly_download_config(spec["object"],"FFT_Binned_PowerSpectrum"))
 
-
                 fig_lomb_bin = go.Figure()
-
-                fig_lomb_bin.add_trace(
-
-                    go.Scatter(
-
+                fig_lomb_bin.add_trace(go.Scatter(
                         x=ps_lomb["logk_bin"],
-
                         y=ps_lomb["logpk_bin"],
-
                         mode="markers+lines",
-
                         error_y=dict(
-
                             type="data",
-
                             array=ps_lomb["logpk_err"],
-
                             visible=True),
-
                         name="Lomb Binned"))
 
                 
-                fig_lomb_bin.update_layout(
-
-                        title=(
+                fig_lomb_bin.update_layout(title=(
                             f"Lomb-Scargle Binned Power Spectrum "
                             f"(Window={window_size}, "
                             f"Bins=20)"),
-
                         xaxis_title="log₁₀(k / km⁻¹ s)",
-
                         yaxis_title="log₁₀(kP(k)/π)")
 
                 st.plotly_chart(
@@ -716,42 +605,22 @@ for spec in spectra:
             #C) FFT vs Lomb Comparison
             #==================================================
             with st.expander("C) FFT vs Lomb-Scargle Comparison",expanded=True):
-
                 fig_compare = go.Figure()
-
-                fig_compare.add_trace(
-
-                    go.Scatter(
+                fig_compare.add_trace(go.Scatter(
                         x=ps_fft["logk_bin"],
-
                         y=ps_fft["logpk_bin"],
-                        
                         mode="lines",
+                        name="FFT"))
 
-                        name="FFT"
-
-                    )
-                )
-
-                fig_compare.add_trace(
-
-                    go.Scatter(
-
+                fig_compare.add_trace(go.Scatter(
                         x=ps_lomb["logk_bin"],
-
                         y=ps_lomb["logpk_bin"],
-
-
                         mode="lines",
-
                         name="Lomb-Scargle"))
 
                 fig_compare.update_layout(
-
                     title=f"FFT(Global Mean) vs Lomb-Scargle (Rolling Mean: Window={window_size},Bins=20)",
-
                     xaxis_title="log₁₀(k / km⁻¹ s)",
-
                     yaxis_title="log₁₀(kP(k)/π)")
 
                 st.plotly_chart(
@@ -767,164 +636,72 @@ for spec in spectra:
                 #==================================================
                 
                 st.subheader("Raw Power Spectrum Tables")
-
                 fft_raw_df = pd.DataFrame({
-
-                    "log10(k)":
-                        ps_fft["logk"],
-
-                    "log10(kP(k)/π)":
-                        ps_fft["logkpk"]
-
-                })
+                    "log10(k)":ps_fft["logk"],
+                    "log10(kP(k)/π)":ps_fft["logkpk"]})
 
                 lomb_raw_df = pd.DataFrame({
-
-                    "log10(k)":
-                        ps_lomb["logk"],
-
-                    "log10(kP(k)/π)":
-                        ps_lomb["logkpk"]
-
-                })
+                    "log10(k)":ps_lomb["logk"],
+                    "log10(kP(k)/π)":ps_lomb["logkpk"]})
 
                 col1, col2 = st.columns(2)
-
                 with col1:
-
                     st.markdown("### FFT Raw")
-
-                    st.dataframe(
-
-                        fft_raw_df,
-
-                        height=300,
-
-                        use_container_width=True
-
-                    )
+                    st.dataframe(fft_raw_df,height=300,use_container_width=True)
 
                 with col2:
-
                     st.markdown("### Lomb-Scargle Raw")
-
-                    st.dataframe(
-
-                        lomb_raw_df,
-
-                        height=300,
-
-                        use_container_width=True
-
-                    )
+                    st.dataframe(lomb_raw_df,height=300,use_container_width=True)
 
                 #==================================================
                 # Binned Data Tables
                 #==================================================
 
                 st.subheader("Binned Power Spectrum Tables")
-
                 fft_bin_df = pd.DataFrame({
-
-                    "log10(k)":
-                        ps_fft["logk_bin"],
-
-                    "log10(kP(k)/π)":
-                        ps_fft["logpk_bin"],
-
-                    "σ":
-                        ps_fft["logpk_err"]
-
-                })
+                    "log10(k)":ps_fft["logk_bin"],
+                    "log10(kP(k)/π)":ps_fft["logpk_bin"],
+                    "σ":ps_fft["logpk_err"]})
 
                 lomb_bin_df = pd.DataFrame({
-
-                    "log10(k)":
-                        ps_lomb["logk_bin"],
-
-                    "log10(kP(k)/π)":
-                        ps_lomb["logpk_bin"],
-
-                    "σ":
-                        ps_lomb["logpk_err"]
-
-                })
+                    "log10(k)":ps_lomb["logk_bin"],
+                    "log10(kP(k)/π)":ps_lomb["logpk_bin"],
+                    "σ":ps_lomb["logpk_err"]})
 
                 col1, col2 = st.columns(2)
 
                 with col1:
-
                     st.markdown("### FFT Binned")
-
-                    st.dataframe(
-
-                        fft_bin_df,
-
-                        use_container_width=True
-
-                    )
+                    st.dataframe(fft_bin_df,use_container_width=True)
 
                 with col2:
-
                     st.markdown("### Lomb-Scargle Binned")
-
-                    st.dataframe(
-
-                        lomb_bin_df,
-
-                        use_container_width=True
-
-                    )
+                    st.dataframe(lomb_bin_df,use_container_width=True)
 
         #-----section 4.2.5: Rolling Mean Diagnostics
 
         if ps_lomb is not None:
-
              with st.expander("Rolling Mean Normalization Diagnostics"):
-
                 #==================================================
                 # Plot A : Flux and Rolling Mean
                 #==================================================
 
-                st.markdown(
-                    "#### Forest Flux and Rolling Mean"
-                )
+                st.markdown("#### Forest Flux and Rolling Mean")
 
                 fig_roll = go.Figure()
-
                 fig_roll.add_trace(
-
-                    go.Scatter(
-
-                        x=ps_lomb["wave_rest"],
-
+                    go.Scatter(x=ps_lomb["wave_rest"],
                         y=ps_lomb["flux_forest"],
-
                         mode="lines",
+                        name="Flux"))
 
-                        name="Flux"
-
-                    )
-                )
-
-                fig_roll.add_trace(
-
-                    go.Scatter(
-
+                fig_roll.add_trace(go.Scatter(
                         x=ps_lomb["wave_rest"],
-
                         y=ps_lomb["smooth"],
-
                         mode="lines",
+                        name=f"Rolling Mean ({window_size} px)"))
 
-                        name=f"Rolling Mean ({window_size} px)"
-
-                    )
-                )
-
-                fig_roll.update_layout(
-
-                    title=(
+                fig_roll.update_layout(title=(
                         f"Flux and Rolling Mean "
                         f"(Window = {window_size} pixels)"
                     ),
