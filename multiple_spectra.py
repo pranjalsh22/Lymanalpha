@@ -1,4 +1,4 @@
-#version 4.1
+#version 5
 
 #----section 1: imports config and dataset folder-------------
 import os
@@ -99,8 +99,6 @@ def extract_lya_forest(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
 
 #---section 2.8: flux_contrast--------------------------------
 def flux_contrast(flux_forest):
-    if len(flux_forest) < 10:
-        return None, None
     Fmean = np.nanmean(flux_forest)
     if not np.isfinite(Fmean):
         return None, None
@@ -129,8 +127,9 @@ def compute_k(N,dv):
 
 #---- section 2.12: power spectrum
 def compute_power_spectrum(fft_vals,N,dv):
-    L = N * dv
-    Pk = (np.abs(fft_vals) ** 2) / L
+    #L = N * dv
+    #Pk = (np.abs(fft_vals) ** 2) / L
+    Pk = (dv / N) * np.abs(fft_vals)**2
     return Pk
 
 #---- section 2.13:
@@ -151,12 +150,7 @@ def lya_power_spectrum_fft(wave_obs,flux,error,z):
     if deltaF is None:
         return None
     velocity, dv_forest = (velocity_grid(wave_rest))
-    fft_vals, N = (compute_fft(deltaF))
-    k = compute_k(N,dv_forest)
-    pk = compute_power_spectrum(fft_vals,N,dv_forest)
-    logk, logkpk = (boera_quantity(k,pk))
-    (logk_bin,logpk_bin,logpk_err) = bin_power_spectrum(k,pk)
-    
+    ps = power_spectrum_fft(deltaF, dv_forest)
     return {
         "wave_rest": wave_rest,
         "flux_forest": flux_forest,
@@ -164,14 +158,9 @@ def lya_power_spectrum_fft(wave_obs,flux,error,z):
         "deltaF": deltaF,
         "velocity": velocity,
         "dv_forest": dv_forest,
-        "fft": fft_vals,
-        "k": k,
-        "pk": pk,
-        "logk": logk,
-        "logkpk": logkpk,
-        "logk_bin": logk_bin,
-        "logpk_bin": logpk_bin,
-        "logpk_err": logpk_err,}
+        **ps
+    }
+    
 
 #------section 2.15: bining the power spectrum-------------
 def bin_power_spectrum(k, pk, n_bins=20):
@@ -196,12 +185,65 @@ def bin_power_spectrum(k, pk, n_bins=20):
         pk_bin.append(np.log10(np.mean(pk_values)))
         pk_err.append(np.std(np.log10(pk_values)))
     return (np.array(k_bin),np.array(pk_bin),np.array(pk_err))
+#------section 2.16: Generic FFT Power Spectrum-------------
+def power_spectrum_fft(deltaF, dv):
+
+    fft_vals, N = compute_fft(deltaF)
+    k = compute_k(N, dv)
+    pk = compute_power_spectrum(fft_vals, N, dv)
+
+    logk, logkpk = boera_quantity(k, pk)
+    logk_bin, logpk_bin, logpk_err = bin_power_spectrum(k, pk)
+
+    return {
+        "fft": fft_vals,
+        "k": k,
+        "pk": pk,
+        "logk": logk,
+        "logkpk": logkpk,
+        "logk_bin": logk_bin,
+        "logpk_bin": logpk_bin,
+        "logpk_err": logpk_err
+    }
 
 #------section 2.16:Finding rolling mean-------------
-def rolling_mean_flux(flux,window=301):
+def rolling_mean_flux(flux,window):
     smooth = (pd.Series(flux).rolling(window=window,center=True,min_periods=1).mean().to_numpy())
     return smooth
+#------section 2.17: Generic Lomb-Scargle Power Spectrum-------------
+def power_spectrum_lomb(velocity, deltaF, dv):
 
+    N = len(deltaF)
+
+    k = compute_k(N, dv)
+    k = k[1:]
+
+    frequency = k / (2 * np.pi)
+
+    ls = LombScargle(
+        velocity,
+        deltaF,
+        normalization="psd"
+    )
+
+    pk = ls.power(frequency)
+    
+    # Experimental:
+    # Convert Astropy PSD normalization to the Lyα FFT normalization.
+    pk *= dv
+    #-------
+    logk, logkpk = boera_quantity(k, pk)
+    logk_bin, logpk_bin, logpk_err = bin_power_spectrum(k, pk)
+
+    return {
+        "k": k,
+        "pk": pk,
+        "logk": logk,
+        "logkpk": logkpk,
+        "logk_bin": logk_bin,
+        "logpk_bin": logpk_bin,
+        "logpk_err": logpk_err
+    }
 #------section 2.17:Finding delta F-------------
 def flux_contrast_rolling(flux_forest):
     smooth = rolling_mean_flux(flux_forest,window=window_size)
@@ -239,38 +281,21 @@ def lya_power_spectrum_lomb(wave_obs,flux,error,z):
     #4)Keep true velocity positions
     velocity_valid = velocity[good]
     deltaF_valid = deltaF[good]
-
-    #5)k grid
-    N = len(deltaF_valid)
-    k = compute_k(N,dv_forest)
-    k = k[1:]
-
-    #6) Lomb Scargle
-    frequency = (k /(2 * np.pi))
-    ls = LombScargle(velocity_valid,deltaF_valid,normalization="psd")
-    pk = ls.power(frequency)
-
-    #7)Boera quantities
-    logk, logkpk = (boera_quantity(k,pk))
-    (logk_bin,logpk_bin,logpk_err) = bin_power_spectrum(k,pk)
-
-    #8)Return
+    ps = power_spectrum_lomb(
+        velocity_valid,
+        deltaF_valid,
+        dv_forest
+    )
     return {
-        "wave_rest":wave_rest,
-        "flux_forest":flux_forest,
-        "smooth":smooth,
-        "deltaF":deltaF,
-        "velocity":velocity,
-        "dv_forest":dv_forest,
-        "k":k,
-        "pk":pk,
-        "logk":logk,
-        "logkpk":logkpk,
-        "logk_bin":logk_bin,
-        "logpk_bin":logpk_bin,
-        "logpk_err":logpk_err,
-        "n_good":np.sum(good),
-        "window_size":window_size}
+        "wave_rest": wave_rest,
+        "flux_forest": flux_forest,
+        "smooth": smooth,
+        "deltaF": deltaF,
+        "velocity": velocity,
+        "dv_forest": dv_forest,
+        "n_good": np.sum(good),
+        "window_size": window_size,
+        **ps}
 
 #------section 2.20: setup to download files with correct name aka Quasar_property.png
 def plotly_download_config(quasar_name,graph_name):
@@ -280,9 +305,28 @@ def plotly_download_config(quasar_name,graph_name):
         	"height": 800,
             "width": 1200,
             "scale": 2}}
+#------section 2.21: Rebin spectrum--------------------------------
+def rebin_spectrum(wave, flux, error, factor=2):
 
+    n = (len(flux) // factor) * factor
+
+    wave = wave[:n]
+    flux = flux[:n]
+    error = error[:n]
+
+    wave_rebin = wave.reshape(-1, factor).mean(axis=1)
+
+    flux_rebin = flux.reshape(-1, factor).mean(axis=1)
+
+    error_rebin = (
+        np.sqrt(
+            np.sum(
+                error.reshape(-1, factor)**2,
+                axis=1)) / factor)
+
+    return (wave_rebin,flux_rebin,error_rebin)
 #------ Section 3:Setting up the data------------------------------------ 
-window_size = st.sidebar.slider("Rolling Mean Window",min_value=51,max_value=1001,value=301,step=50)
+window_size = st.sidebar.slider("Rolling Mean Window",min_value=51,max_value=3000,value=2201,step=50)
 pairs = find_pairs(SPEC_DIR)
 summary_rows = []
 spectra = []
@@ -334,12 +378,161 @@ for key, files in pairs.items():
         st.warning(f"{key}: {e}")
 
 #-----section 4: Display---------------------------
-#-----section 4.1
+#-----section 4.0: Setup-------------------------
 st.title("Power spectrum")
 summary_df = pd.DataFrame(summary_rows)
 st.header("Dataset Summary")
 st.dataframe(summary_df,use_container_width=True)
 st.header("Individual Spectra")
+
+#-----section 4.1: Testing the Pipeline------------------------------------
+with st.expander("White Noise Validation Test", expanded=False):
+
+    with st.expander("Normalisation used(theory):"):
+
+        st.markdown("""For Gaussian white noise, the power spectrum is expected to be:""")
+
+        st.latex(r"\left<P(k)\right>=\sigma^2\Delta v")
+        st.markdown("The FFT power spectrum is computed using the normalization")
+
+        st.latex(
+        r"P_{\rm FFT}(k)=\frac{\Delta v}{N} \left|\mathrm{FFT}(\delta_F)\right|^2")
+
+        st.markdown("""This normalization gives the power spectrum units of km s⁻¹ and
+        reproduces the theoretical white-noise expectation
+        ⟨P(k)⟩ = σ²Δv.""")
+
+        st.markdown("""The Lomb–Scargle periodogram is computed using Astropy'sPSD normalization.""")
+
+        st.latex(r"P_{\rm Lomb}(k)=\Delta v\,P_{\rm PSD}(k)")
+
+        st.markdown("""Multiplication by Δv converts the Astropy PSD normalization to the
+        same normalization convention as the FFT estimator.""")
+        
+    #---------------------------------------------------------
+    # Generate White Noise
+    #---------------------------------------------------------
+    N = st.number_input("Number of points",value=50000)
+    dv = st.number_input("dv=",value=2.5)
+
+    sigma=st.number_input(r"$\sigma$ =",value=1)
+
+    velocity = np.arange(N) * dv
+    deltaF = np.random.normal(0, sigma, N)
+    #sigma = np.std(deltaF)
+    expected_power = sigma**2 * dv
+    
+    fft_test = power_spectrum_fft(deltaF, dv)
+
+    lomb_test = power_spectrum_lomb(velocity, deltaF, dv)  
+
+    st.subheader("Validation Statistics")
+
+    st.write(f"σ = {sigma:.4f}")
+    st.write(f"Expected <P(k)> = σ² dv = {expected_power:.4f}")
+
+    st.write(f"FFT Mean = {np.mean(fft_test['pk']):.4f}")
+    st.write(f"Lomb Mean = {np.mean(lomb_test['pk']):.4f}")
+
+
+    #---------------------------------------------------------
+    # A) White Noise Signal
+    #---------------------------------------------------------
+    with st.expander("A) White Noise Signal"):
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+                x=velocity,
+                y=deltaF,
+                mode="lines",
+                name="White Noise"))
+
+        fig.update_layout(
+            title="Generated White Noise",
+            xaxis_title="Velocity (km/s)",
+            yaxis_title="δF")
+
+        st.plotly_chart(fig, use_container_width=True)
+        
+    #---------------------------------------------------------
+    # B) Binned P(k)
+    #---------------------------------------------------------
+    with st.expander("B) Binned P(k)", expanded=True):
+        
+
+        valid_fft = (
+            np.isfinite(fft_test["k"])
+            & np.isfinite(fft_test["pk"])
+            & (fft_test["k"] > 0)
+            & (fft_test["pk"] > 0))
+
+        valid_lomb = (
+            np.isfinite(lomb_test["k"])
+            & np.isfinite(lomb_test["pk"])
+            & (lomb_test["k"] > 0)
+            & (lomb_test["pk"] > 0))
+
+        fft_bins = np.linspace(
+            np.log10(fft_test["k"][valid_fft]).min(),
+            np.log10(fft_test["k"][valid_fft]).max(),
+            21)
+
+        lomb_bins = np.linspace(
+            np.log10(lomb_test["k"][valid_lomb]).min(),
+            np.log10(lomb_test["k"][valid_lomb]).max(),
+            21)
+
+        fft_x = []
+        fft_y = []
+
+        for i in range(20):
+            m = ((np.log10(fft_test["k"][valid_fft]) >= fft_bins[i])&
+                (np.log10(fft_test["k"][valid_fft]) < fft_bins[i+1]))
+            
+            if np.sum(m):
+                fft_x.append(np.mean(np.log10(fft_test["k"][valid_fft][m])))
+                pk_values = fft_test["pk"][valid_fft][m]
+                fft_y.append(np.log10(np.mean(pk_values)))
+
+        lomb_x = []
+        lomb_y = []
+
+        for i in range(20):
+            m = ((np.log10(lomb_test["k"][valid_lomb]) >= lomb_bins[i])&
+                (np.log10(lomb_test["k"][valid_lomb]) < lomb_bins[i+1]))
+            
+            if np.sum(m):
+                lomb_x.append(np.mean(np.log10(lomb_test["k"][valid_lomb][m])))
+                pk_values = lomb_test["pk"][valid_lomb][m]
+                lomb_y.append(np.log10(np.mean(pk_values)))
+                
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+                x=fft_x,
+                y=fft_y,
+                mode="markers+lines",
+                name="FFT"))
+        
+        fig.add_hline(
+            y=np.log10(expected_power),
+            line_dash="dash",
+            line_color="black",
+            annotation_text="Expected <P(k)> = σ² dv")
+        
+        fig.add_trace(go.Scatter(
+                x=lomb_x,
+                y=lomb_y,
+                mode="markers+lines",
+                name="Lomb-Scargle"))
+
+        fig.update_layout(
+            title="White Noise Binned Power Spectrum",
+            xaxis_title="log₁₀(k / km⁻¹ s)",
+            yaxis_title="log₁₀(P(k))")
+
+        st.plotly_chart(fig, use_container_width=True)
 
 #-----section 4.2: Loop Through Spectra
 for spec in spectra:
@@ -485,6 +678,86 @@ for spec in spectra:
                     use_container_width=True,
                         config=plotly_download_config(spec["object"],"FFT_vs_LombScarglePowerSpectrum"))
 
+
+
+            #D) Large-scale Power Stability Test
+            with st.expander("D) Large-scale Power Stability Test"):
+                wave2, flux2, error2 = rebin_spectrum(
+                    wave,
+                    flux,
+                    error,
+                    factor=2
+                )
+
+                ps_fft2 = lya_power_spectrum_fft(
+                    wave2,
+                    flux2,
+                    error2,
+                    spec["z"]
+                )
+
+                ps_lomb2 = lya_power_spectrum_lomb(
+                    wave2,
+                    flux2,
+                    error2,
+                    spec["z"]
+                )
+                #---------------------------------------------------------
+                # Comparison plot
+                #---------------------------------------------------------
+                fig = go.Figure()
+
+
+                # FFT Rebinned (solid)
+                fig.add_trace(
+                    go.Scatter(
+                        x=ps_fft2["logk_bin"],
+                        y=ps_fft2["logpk_bin"],
+                        mode="lines",
+                        name="FFT (Rebinned)"))
+                # FFT Original (dotted)
+                fig.add_trace(
+                    go.Scatter(
+                        x=ps_fft["logk_bin"],
+                        y=ps_fft["logpk_bin"],
+                        mode="lines",
+                        name="FFT (Original)",
+                        line=dict(dash="dot")))
+                
+
+                # Lomb Rebinned (solid)
+                fig.add_trace(
+                    go.Scatter(
+                        x=ps_lomb2["logk_bin"],
+                        y=ps_lomb2["logpk_bin"],
+                        mode="lines",
+                        name="Lomb (Rebinned)"))
+                # Lomb Original (dotted)
+                fig.add_trace(
+                    go.Scatter(
+                        x=ps_lomb["logk_bin"],
+                        y=ps_lomb["logpk_bin"],
+                        mode="lines",
+                        name="Lomb (Original)",
+                        line=dict(dash="dot")))
+
+                fig.update_layout(
+                    title="Large-scale Power Stability after Pixel Rebinning",
+                    xaxis_title="log₁₀(k / km⁻¹ s)",
+                    yaxis_title="log₁₀(kP(k)/π)")
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config=plotly_download_config(
+                        spec["object"],
+                        "LargeScalePowerStability"))
+                st.write(ps_fft["k"].min(), ps_fft["k"].max())
+                st.write(ps_fft2["k"].min(), ps_fft2["k"].max())
+
+                st.write(ps_lomb["k"].min(), ps_lomb["k"].max())
+                st.write(ps_lomb2["k"].min(), ps_lomb2["k"].max())
+            #------------------------------------------------------    
             # Data Tables
             with st.expander("Data Table"):
 
