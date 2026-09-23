@@ -1,5 +1,4 @@
-#version 9
-
+#versionn 12
 #----section 1: imports config and dataset folder-------------
 import os
 import numpy as np
@@ -11,10 +10,10 @@ from astropy.timeseries import LombScargle
 from astropy.cosmology import FlatLambdaCDM
 from scipy.interpolate import interp1d
 
+st.caption('version 12')
 st.set_page_config(page_title=".fit file plots",layout="wide")
 
 SPEC_DIR = "spec" #name of the folder
-
 redshifts = {
     "J0306+1853_HIRES": 5.363,
     "J0957+0610_UVES": 4.28,
@@ -32,11 +31,13 @@ redshifts = {
     "J0747+1153_HIRES": 5.26,
     "J0915+4924_HIRES": 5.20,}
 
-# Sherwood / Sherwood-Relics cosmology
-cosmo = FlatLambdaCDM(H0=67.8,Om0=0.308,Ob0=0.0482)
+cosmo = FlatLambdaCDM(H0=67.8,Om0=0.308,Ob0=0.0482) # Sherwood / Sherwood-Relics cosmology
 
-#----section 2:user defined functions
-#----section 2.1: create arr = array of data from source using load_fits(source)----------
+# SECTION 2 : USER-DEFINED FUNCTIONS
+
+# SECTION 2.1 : GENERAL DATA HANDLING
+
+# 2.1.1 Load FITS spectrum
 def load_fits(source):
     with fits.open(source) as hdul: #HDU is Header data unit list. in this case there's only one HDU 
         for hdu in hdul:
@@ -45,15 +46,15 @@ def load_fits(source):
                 return (np.squeeze(arr),hdu.header)
     raise ValueError(f"No spectrum found in {source}")
 
-#----section 2.2:create wavelength array---------
+# 2.1.2 Create wavelength array
 def wavelength_array(header, n):
     return 10 ** (header["CRVAL1"]+ np.arange(n) * header["CDELT1"])
 
-#----section 2.3:calculating velocity spacing, snr quality
+# 2.1.3 Compute velocity spacing
 def velocity_spacing(header):
     return (299792.458* np.log(10)* header["CDELT1"])
 
-#----section 2.4: quality labels-----------------
+# 2.1.4 Assign S/N quality label
 def quality_label(snr):
     if snr > 20:
         return "Excellent(>20)"
@@ -63,8 +64,8 @@ def quality_label(snr):
         return "Moderate(>5)"
     else:
         return "Poor(<5)"
-
-#----section 2.5: creating pair of error and flux files for same quasar
+    
+# 2.1.5 pair flux and error spectra
 def find_pairs(folder):
     pairs = {}
     if not os.path.isdir(folder):
@@ -83,7 +84,7 @@ def find_pairs(folder):
             pairs[key]["error"] = full
     return {k: v for k, v in pairs.items() if ("flux" in v and "error" in v)}
 
-#---section 2.6: SNR calculation--------------------------------
+# 2.1.6 Compute signal-to-noise statistics
 def snr_calculations(n,header,flux,error):
     snr = np.full(n,np.nan) 
     good = (np.isfinite(flux) & np.isfinite(error) & (error > 0))
@@ -92,15 +93,28 @@ def snr_calculations(n,header,flux,error):
     masked_fraction = (np.sum(~np.isfinite(flux))/len(flux) * 100)
     return snr,median_snr,masked_fraction
 
-#---section 2.7: Lya power spectrum--------------------------------
-def extract_lya_forest(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
-    wave_rest = (wave_obs/ (1 + z))
-    good_flux = np.isfinite(flux)
-    good_error = (np.isfinite(error) & (error > 0))
-    mask = ((wave_rest >= rest_min) & (wave_rest <= rest_max) & good_flux & good_error)
-    return (wave_rest[mask],flux[mask])
+# SECTION 2.2 : COMMON Lyα FOREST PREPROCESSING: Preprocessing steps shared by both the FFT and Lomb–Scargle estimators.
 
-#---section 2.8: flux_contrast--------------------------------
+# 2.2.1 Extract the Lyα forest
+def extract_lya_forest(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
+    wave_rest = wave_obs / (1 + z)
+
+    good = (np.isfinite(flux)
+        & np.isfinite(error)
+        & (error > 0))
+
+    forest = ((wave_rest >= rest_min) & (wave_rest <= rest_max))
+
+    mask = forest & good
+
+    return {
+        "wave_obs": wave_obs[mask],
+        "wave_rest": wave_rest[mask],
+        "flux": flux[mask],
+        "error": error[mask]
+    }
+
+# 2.2.2 Compute flux contrast (global mean normalization)
 def flux_contrast(flux_forest):
     Fmean = np.nanmean(flux_forest)
     if not np.isfinite(Fmean):
@@ -110,35 +124,97 @@ def flux_contrast(flux_forest):
     deltaF = (flux_forest- Fmean) / Fmean
     return (Fmean,deltaF)
 
-#---section 2.9:velocity grid--------------------------------
+# 2.2.3 Construct the velocity coordinate
 def velocity_grid(wave_rest):
     c = 299792.458
     velocity = (c* np.log(wave_rest))
     dv = np.median(np.diff(velocity))
     return (velocity,dv)
 
-#---- section 2.10:FFT------------
+# 2.2.4 Bin the power spectrum onto logarithmic k bins
+def bin_power_spectrum(k, pk):
+    valid = (np.isfinite(k) & np.isfinite(pk) & (k > 0) & (pk > 0))
+    k = k[valid]
+    pk = pk[valid]
+    logk = np.log10(k)
+    k_bin = []
+    pk_bin = []
+    pk_err = []
+    n_modes = []
+
+    for i in range(len(K_BIN_EDGES)-1):
+        logk_center = 0.5 * (K_BIN_EDGES[i] + K_BIN_EDGES[i+1])
+        k_center = 10**logk_center
+        m = ((logk >= K_BIN_EDGES[i]) &
+             (logk <  K_BIN_EDGES[i+1]))
+
+        if np.sum(m) == 0:
+            k_bin.append(k_center)
+            pk_bin.append(np.nan)
+            pk_err.append(np.nan)
+            n_modes.append(0)
+            continue
+
+        k_bin.append(k_center)
+        pk_bin.append(np.mean(pk[m]))
+
+        if np.sum(m) > 1:
+            pk_err.append(np.std(pk[m], ddof=1))
+        else:
+            pk_err.append(0.0)
+
+        n_modes.append(np.sum(m))
+        
+    return (
+        np.asarray(k_bin),
+        np.asarray(pk_bin),
+        np.asarray(pk_err),
+        np.asarray(n_modes))
+
+# SECTION 2.3 : FFT POWER SPECTRUM ESTIMATOR
+
+# ----- Step 1 : Compute the Fast Fourier Transform (FFT)
 def compute_fft(deltaF):
     N = len(deltaF)
     fft_vals = np.fft.rfft(deltaF)
     return (fft_vals,N)
 
-#---- section 2.11: k array
+# ----- Step 2 : Construct the Fourier k array
 def compute_k(N,dv):
     k = (2* np.pi* np.fft.rfftfreq(N,d=dv))
     return k
 
-#---- section 2.12: power spectrum
+# ----- Step 3 : Compute the FFT power spectrum
 def compute_power_spectrum(fft_vals,N,dv):
     Pk = (dv / N) * np.abs(fft_vals)**2
     return Pk
 
-#---- section 2.14: master power spectrum function
+# ----- Step 4 : Assemble the generic FFT power-spectrum estimator
+def power_spectrum_fft(deltaF, dv):
+    fft_vals, N = compute_fft(deltaF)
+    k = compute_k(N, dv)
+    pk = compute_power_spectrum(fft_vals, N, dv)
+    k_bin, pk_bin, pk_err,n_modes = bin_power_spectrum(k,pk)
+    return {
+        "fft": fft_vals,
+        "k": k,
+        "pk": pk,
+        "k_bin": k_bin,
+        "pk_bin": pk_bin,
+        "pk_err": pk_err,
+        "n_modes": n_modes}
+
+# ----- Step 5 : Assemble the complete Lyα FFT pipeline
 def lya_power_spectrum_fft(wave_obs,flux,error,z):
-    wave_rest, flux_forest = (extract_lya_forest(wave_obs,flux,error,z))
+    forest = extract_lya_forest(wave_obs,flux,error,z)
+    wave_rest = forest["wave_rest"]
+    flux_forest = forest["flux"]
+    
     if len(flux_forest) < 10:
         return None
+
     Fmean, deltaF = (flux_contrast(flux_forest))
+
     if deltaF is None:
         return None
     velocity, dv_forest = (velocity_grid(wave_rest))
@@ -152,63 +228,9 @@ def lya_power_spectrum_fft(wave_obs,flux,error,z):
         "dv_forest": dv_forest,
         **ps}
 
-#------section 2.15: bining the power spectrum-------------
-def bin_power_spectrum(k, pk):
-    valid = (np.isfinite(k) & np.isfinite(pk) & (k > 0) & (pk > 0))
-    k = k[valid]
-    pk = pk[valid]
-    logk = np.log10(k)
-    k_bin = []
-    pk_bin = []
-    pk_err = []
-    n_modes = []
+# SECTION 2.4 : LOMB–SCARGLE POWER SPECTRUM ESTIMATOR
 
-    for i in range(len(K_BIN_EDGES)-1):
-        m = ((logk >= K_BIN_EDGES[i]) & (logk <  K_BIN_EDGES[i+1]))
-        if np.sum(m) == 0:
-            k_bin.append(np.nan)
-            pk_bin.append(np.nan)
-            pk_err.append(np.nan)
-            n_modes.append(0)
-            continue
-        
-        k_bin.append(np.mean(k[m]))
-        pk_bin.append(np.mean(pk[m]))
-        if np.sum(m) > 1:
-            pk_err.append(np.std(pk[m], ddof=1))
-        else:
-            pk_err.append(0.0)
-
-        n_modes.append(np.sum(m))
-
-        
-    return (
-        np.asarray(k_bin),
-        np.asarray(pk_bin),
-        np.asarray(pk_err),
-        np.asarray(n_modes))
-
-#------section 2.16: Generic FFT Power Spectrum-------------
-def power_spectrum_fft(deltaF, dv):
-
-    fft_vals, N = compute_fft(deltaF)
-    k = compute_k(N, dv)
-    pk = compute_power_spectrum(fft_vals, N, dv)
-
-    k_bin, pk_bin, pk_err,n_modes = bin_power_spectrum(
-        k,
-        pk
-        )
-    return {
-        "fft": fft_vals,
-        "k": k,
-        "pk": pk,
-        "k_bin": k_bin,
-        "pk_bin": pk_bin,
-        "pk_err": pk_err,
-        "n_modes": n_modes}
-
-#------section 2.16:Finding rolling mean-------------
+# ----- Step 1 : Compute the rolling-mean continuum
 def rolling_mean_flux(flux, chi, window_cMpc):
     half_window = window_cMpc / 2.0
     smooth = np.full_like(flux, np.nan, dtype=float)
@@ -221,8 +243,14 @@ def rolling_mean_flux(flux, chi, window_cMpc):
             smooth[i] = np.mean(values[good])
     return smooth
 
-#------section 2.17: Generic Lomb-Scargle Power Spectrum-------------
-def power_spectrum_lomb(velocity, deltaF, dv):
+# ----- Step 2 : Compute rolling-mean flux contrast (δF)
+def flux_contrast_rolling(flux_forest,chi_forest,window_cMpc):
+    smooth = rolling_mean_flux(flux_forest,chi_forest,window_cMpc)
+    deltaF = (flux_forest / smooth) - 1
+    return smooth, deltaF
+
+# ----- Step 3 : Compute the raw Lomb–Scargle periodogram
+def power_spectrum_lomb_raw(velocity, deltaF, dv):
     N = len(deltaF)
     k = compute_k(N, dv)
     k = k[1:]
@@ -230,51 +258,55 @@ def power_spectrum_lomb(velocity, deltaF, dv):
     ls = LombScargle(velocity,deltaF,normalization="psd")
     pk = ls.power(frequency)
     pk *= dv    # Convert Astropy PSD normalization to the Lyα FFT normalization.
-    k_bin, pk_bin, pk_err,n_modes = bin_power_spectrum(k, pk)
-
     return {
         "k": k,
-        "pk": pk,
-        "k_bin": k_bin,
-        "pk_bin": pk_bin,
-        "pk_err": pk_err,
-        "n_modes": n_modes}
+        "pk": pk}
 
-#------section 2.17:Finding delta F-------------
-def flux_contrast_rolling(flux_forest,chi_forest,window_cMpc):
-    smooth = rolling_mean_flux(flux_forest,chi_forest,window_cMpc)
-    deltaF = (flux_forest / smooth) - 1
-    return smooth, deltaF
+# ----- Step 4 : Estimate the noise power spectrum using Monte Carlo realizations
+def estimate_noise_periodogram(velocity,error,smooth,dv,n_realizations=200):
+    noise_pk = []
+    good = (np.isfinite(error) & np.isfinite(smooth) & (smooth != 0))
+    velocity = velocity[good]
+    sigma = error[good] / smooth[good]
 
-#------section 2.18: 
-def extract_lya_forest_lomb(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
-    wave_rest = (wave_obs /(1+z))
-    forest = ((wave_rest >= rest_min) & (wave_rest <= rest_max))
-    good = (np.isfinite(flux) & np.isfinite(error) & (error > 0))
-    return (wave_rest[forest],flux[forest],good[forest])
+    for _ in range(n_realizations):
+        deltaF_noise = np.random.normal(loc=0.0,scale=sigma)
+        ps = power_spectrum_lomb_raw(velocity,deltaF_noise,dv)
+        noise_pk.append(ps["pk"])
 
-#------section 2.19: lomb periodogram method for power spectrum
-def lya_power_spectrum_lomb(wave_obs,flux,error,z,window_cMpc,segment_length):
-    #1)Forest extraction
-    wave_rest = wave_obs / (1 + z)
-    forest = ((wave_rest >= 1040) & (wave_rest <= 1180))
-    if np.sum(forest) < 10:
+    noise_pk = np.asarray(noise_pk)
+    return {
+        "k": ps["k"],
+        "pk": np.mean(noise_pk, axis=0)}
+
+# ----- Step 5 : Assemble the complete Lyα Lomb–Scargle pipeline
+def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_length):
+
+
+    forest = extract_lya_forest(wave_obs,flux,error,z)
+    wave_obs_forest = forest["wave_obs"]
+    wave_rest = forest["wave_rest"]
+    flux_forest = forest["flux"]
+    error_forest = forest["error"]
+
+    if len(flux_forest) < 10:
         return None
-    wave_rest = wave_rest[forest]
-    chi_forest = comoving_coordinate(wave_obs[forest])
-    flux_forest = flux[forest]
-    error_forest = error[forest]
 
-    #2)Velocity coordinate
+    chi_forest = comoving_coordinate(wave_obs_forest)
+
+    
     velocity, dv_forest = velocity_grid(wave_rest)
+    smooth, deltaF = flux_contrast_rolling(flux_forest,chi_forest, window_cMpc)
 
-    #3)Rolling mean normalization
-    smooth, deltaF = flux_contrast_rolling(flux_forest,chi_forest,window_cMpc)
-    good = (np.isfinite(flux_forest)&np.isfinite(error_forest)&(error_forest > 0)&np.isfinite(smooth)&(smooth != 0))
+    good = (np.isfinite(flux_forest)
+        & np.isfinite(error_forest)
+        & (error_forest > 0)
+        & np.isfinite(smooth)
+        & (smooth != 0))
+
     if np.sum(good) < 10:
         return None
 
-    # 4) Split into fixed comoving segments
     segments = split_into_segments(chi_forest,segment_length=segment_length)
     segment_ps = []
 
@@ -282,15 +314,38 @@ def lya_power_spectrum_lomb(wave_obs,flux,error,z,window_cMpc,segment_length):
         segment_good = good[indices]
         if np.sum(segment_good) < 10:
             continue
+
         velocity_seg = velocity[indices][segment_good]
         deltaF_seg = deltaF[indices][segment_good]
-        ps = power_spectrum_lomb(velocity_seg,deltaF_seg,dv_forest)
-        segment_ps.append(ps)
+        error_seg = error_forest[indices][segment_good]
+        smooth_seg = smooth[indices][segment_good]
+        raw_ps_seg = power_spectrum_lomb_raw(velocity_seg,deltaF_seg,dv_forest)
+        noise_ps_seg = estimate_noise_periodogram(velocity_seg,error_seg,smooth_seg,dv_forest)
+        pk_corrected = (raw_ps_seg["pk"]- noise_ps_seg["pk"])
+        k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(raw_ps_seg["k"],pk_corrected)
+        wave_center = np.mean(wave_obs_forest[indices])
+        segment_z = wave_center / 1215.67 - 1.0
+        segment_ps.append({
+            "z": segment_z,
+            "k_bin": k_bin,
+            "pk_bin": pk_bin,
+            "pk_err": pk_err,
+            "n_modes": n_modes})
 
     average_ps = average_segment_power_spectra(segment_ps)
 
-    # Raw Lomb spectrum of the full forest (used for Section A)
-    ps_raw = power_spectrum_lomb(velocity[good],deltaF[good],dv_forest)
+    if average_ps is None:
+        return None
+
+    # --------------------------------------------------
+    # 5) Full forest (diagnostic only)
+    # --------------------------------------------------
+    raw_ps = power_spectrum_lomb_raw(velocity[good],deltaF[good],dv_forest)
+    noise_ps = estimate_noise_periodogram(velocity[good],error_forest[good],smooth[good],dv_forest)
+    pk_corrected = raw_ps["pk"] - noise_ps["pk"]
+
+    # Optional: useful for diagnostic plots
+    k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(raw_ps["k"],pk_corrected)
 
     return {
         "wave_rest": wave_rest,
@@ -301,24 +356,26 @@ def lya_power_spectrum_lomb(wave_obs,flux,error,z,window_cMpc,segment_length):
         "dv_forest": dv_forest,
         "n_good": np.sum(good),
         "window_cMpc": window_cMpc,
+        "n_modes": average_ps["n_modes"],
+
+        # Raw full-forest spectrum (diagnostic)
+        "k": raw_ps["k"],
+        "pk": raw_ps["pk"],
+        "noise_pk": noise_ps["pk"],
+        "pk_corrected": pk_corrected,
+
+        # Individual corrected segment spectra
         "segment_ps": segment_ps,
 
-        # Raw spectrum
-        "k": ps_raw["k"],
-        "pk": ps_raw["pk"],
-        "raw_k_bin": ps_raw["k_bin"],
-        "raw_n_modes": ps_raw["n_modes"],
-        
-        # Averaged segment spectrum
+        # Final science result (Boera et al.)
         "k_bin": average_ps["k_bin"],
         "pk_bin": average_ps["pk_bin"],
-        "pk_err": average_ps["pk_err"]}
+        "pk_err": average_ps["pk_err"],
+    }
 
-#------section 2.20: setup to download files with correct name aka Quasar_property.png
-def plotly_download_config(quasar_name,graph_name):
-    return {"toImageButtonOptions": {"format": "png","filename":f"{quasar_name}_{graph_name}","height": 800,"width": 1200,"scale": 2}}
+# SECTION 2.5 : COMOVING-SPACE UTILITIES
 
-#------section 2.21: Rebin spectrum--------------------------------
+# 2.5.1 Rebin a spectrum
 def rebin_spectrum(wave, flux, error, factor=2):
     n = (len(flux) // factor) * factor
     wave = wave[:n]
@@ -329,7 +386,7 @@ def rebin_spectrum(wave, flux, error, factor=2):
     error_rebin = (np.sqrt(np.sum(error.reshape(-1, factor)**2,axis=1)) / factor)
     return (wave_rebin,flux_rebin,error_rebin)
 
-#------section 2.23: rolling window size--------------------------------
+# 2.5.2 Convert rolling window from cMpc to pixels
 def rolling_window_pixels(window_cMpc, chi):    #Convert a physical window (h^-1 cMpc) into an equivalent number of pixels.
     spacing = mean_pixel_spacing(chi)
     window_pixels = int(np.round(window_cMpc / spacing))
@@ -337,18 +394,18 @@ def rolling_window_pixels(window_cMpc, chi):    #Convert a physical window (h^-1
         window_pixels += 1
     return max(3, window_pixels)
 
-#------section 2.24: comoving coordinate--------------------------------
+# 2.5.3 Compute comoving coordinate
 def comoving_coordinate(wave):    #Comoving coordinate of each pixel in h^-1 cMpc.
     z = wave / 1215.67 - 1.0
     chi = cosmo.comoving_distance(z).value
-    return chi * cosmo.h 
+    return chi * cosmo.h
 
+# 2.5.4 Compute mean pixel spacing
 def mean_pixel_spacing(chi): #Mean pixel spacing in h^-1 cMpc.
     return np.mean(np.diff(chi))
 
-#------section 2.25: Split forest into fixed comoving segments------------
+# 2.5.5 Split the Lyα forest into fixed comoving segments
 def split_into_segments(chi, segment_length=10.0):
-    
     #Parameters
     #chi : ndarray  Comoving coordinate (h^-1 cMpc).
     #segment_length : float Segment size in h^-1 cMpc.
@@ -370,37 +427,71 @@ def split_into_segments(chi, segment_length=10.0):
             segments.append(indices)
     return segments
 
-#------section 2.26: Average segment power spectra------------
+# 2.5.6 Average segment power spectra
 def average_segment_power_spectra(segment_ps):
 
     if len(segment_ps) == 0:
         return None
+
     k_bin = segment_ps[0]["k_bin"]
+
+    # Shape: (n_segments, n_bins)
     pk = np.array([ps["pk_bin"] for ps in segment_ps])
-    mean_pk = np.mean(pk, axis=0)
-    std_pk = np.std(pk, axis=0, ddof=1)
 
-    for i, ps in enumerate(segment_ps):
-        print(i, np.allclose(ps["k_bin"], segment_ps[0]["k_bin"]))
+    # Number of finite measurements contributing to each bin
+    valid_counts = np.sum(np.isfinite(pk), axis=0)
 
-    return {"k_bin": k_bin,
+    # Initialise outputs
+    mean_pk = np.full(pk.shape[1], np.nan)
+    std_pk = np.full(pk.shape[1], np.nan)
+
+    # Mean: only where at least one segment contributes
+    good_mean = valid_counts > 0
+    if np.any(good_mean):
+        mean_pk[good_mean] = np.nanmean(pk[:, good_mean],axis=0)
+
+    # Standard deviation: only where at least two segments contribute
+    good_std = valid_counts > 1
+    if np.any(good_std):
+        std_pk[good_std] = np.nanstd(pk[:, good_std],axis=0,ddof=1)
+
+    # Total contributing modes
+    total_modes = np.sum([ps["n_modes"] for ps in segment_ps],axis=0)
+    
+    return {
+        "k_bin": k_bin,
         "pk_bin": mean_pk,
-        "pk_err": std_pk}
+        "pk_err": std_pk,
+        "n_modes": total_modes}
 
+# 2.5.7 Group segments into redshift bins
+def group_segments_by_redshift(all_segments, redshift_bins):
+    grouped = {}
+    for zmin, zmax in redshift_bins:
+        key = (zmin, zmax)
+        grouped[key] = [seg for seg in all_segments if zmin <= seg["z"] < zmax]
+    return grouped
 
-#------ Section 3:Setting up the data------------------------------------ 
+# SECTION 2.6 : VISUALIZATION UTILITIES
+
+# 2.6.1 Plot download configuration
+def plotly_download_config(quasar_name,graph_name):
+    return {"toImageButtonOptions": {"format": "png","filename":f"{quasar_name}_{graph_name}","height": 800,"width": 1200,"scale": 2}}
+
+# SECTION 3 : ANALYSIS PIPELINE
+
+# SECTION 3.1 : USER INPUTS IN SIDEBAR
+
 window_cMpc = st.sidebar.number_input("Rolling Mean Window (h⁻¹ cMpc)",min_value=10.0,max_value=100.0,value=40.0,step=5.0)
+st.sidebar.caption("Notation: cMpc = comoving Mpc")
 
-st.sidebar.caption("Notation: cMpc = comoving Mpc (standard Lyα forest convention)")
-
-segment_length = st.sidebar.number_input("Segment Length (h⁻¹ cMpc)",
-    min_value=5.0,max_value=50.0,value=10.0,step=1.0)
+segment_length = st.sidebar.number_input("Segment Length (h⁻¹ cMpc)",min_value=5.0,max_value=50.0,value=10.0,step=1.0)
 
 logk_min = st.sidebar.number_input("Minimum log10(k)",value=-2.2,step=0.1)
-
 logk_max = st.sidebar.number_input("Maximum log10(k)",value=-0.7,step=0.1)
-
 delta_logk = st.sidebar.number_input("Δlog10(k)",value=0.1,step=0.01)
+
+K_BIN_EDGES = np.arange(logk_min,logk_max + delta_logk,delta_logk)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Cosmology Conversion")
@@ -410,8 +501,8 @@ st.sidebar.latex(r"\Delta\chi=\chi_{i+1}-\chi_i")
 st.sidebar.latex(r"N_{\rm pix}=\frac{L_{\rm cMpc}}{\langle\Delta\chi\rangle}")
 
 
+# SECTION 3.2 : LOAD AND PREPARE SPECTRA
 
-K_BIN_EDGES = np.arange(logk_min,logk_max + delta_logk,delta_logk)
 
 pairs = find_pairs(SPEC_DIR)
 summary_rows = []
@@ -477,14 +568,78 @@ for key, files in pairs.items():
     except Exception as e:
         st.info(f"{key}: {e}")
 
-#-----section 4: Display---------------------------
+# Collect all 10 h^-1 cMpc segments from every quasar
+
+all_segments = []
+for spec in spectra:
+
+    if spec["ps_lomb"] is None:
+        continue
+
+    all_segments.extend(spec["ps_lomb"]["segment_ps"])
+
+REDSHIFT_BINS = [
+    (4.2, 4.6),
+    (4.6, 5.0),
+    (5.0, 5.4),
+    (5.4, 5.8)]
+
+grouped_segments = group_segments_by_redshift(all_segments,REDSHIFT_BINS)
+
+# Average power spectrum in each redshift bin
+redshift_results = {}
+
+for zbin, segments in grouped_segments.items():
+
+    if len(segments) == 0:
+        continue
+
+    redshift_results[zbin] = average_segment_power_spectra(segments)
+
+
+
+
+# SECTION 4 : RESULTS AND VISUALISATION
+
 #-----section 4.0: Setup-------------------------
 st.title("Power spectrum")
+
+#-----section 4.1: combined result-------------------------
+st.header("Combined Lyα Forest Power Spectrum")
+st.caption("Average Lomb–Scargle power spectrum grouped by redshift.")
+
+fig = go.Figure()
+
+for (zmin, zmax), result in redshift_results.items():
+    valid = (np.isfinite(result["pk_bin"]) & (result["pk_bin"] > 0))
+    fig.add_trace(go.Scatter(
+            x=np.log10(result["k_bin"][valid]),
+            y=np.log10(result["k_bin"][valid] * result["pk_bin"][valid]/ np.pi),
+            mode="markers+lines",
+            name=f"{zmin:.1f} ≤ z < {zmax:.1f}",
+
+            error_y=dict(type="data",array=(result["pk_err"][valid] / (result["pk_bin"][valid]* np.log(10))),visible=True,),))
+
+fig.update_layout(title="Mean Lyα Forest Power Spectrum",
+    xaxis_title="log₁₀(k / km⁻¹ s)",
+    yaxis_title="log₁₀(kP(k)/π)",
+    legend_title="Redshift bin")
+
+st.plotly_chart(fig, width="stretch")
+
+summary = []
+
+for (zmin, zmax), segments in grouped_segments.items():
+    summary.append({
+        "Redshift bin": f"{zmin:.1f}–{zmax:.1f}",
+        "Segments": len(segments),})
+
+st.dataframe(pd.DataFrame(summary), width="stretch")
+
 summary_df = pd.DataFrame(summary_rows)
 st.header("Dataset Summary")
-st.dataframe(summary_df,use_container_width=True)
+st.dataframe(summary_df,width='stretch')
 st.header("Individual Spectra")
-
 
 #-----section 4.2: Loop Through Spectra
 for spec in spectra:
@@ -525,8 +680,8 @@ for spec in spectra:
                 st.markdown("### Using FFT")
                 st.metric("Forest Pixels",len(ps_fft["deltaF"]))
                 st.metric("Mean Flux",f"{ps_fft['Fmean']:.3e}")
-                st.metric("Minimum Modes / Bin",np.min(ps_lomb["raw_n_modes"]))
-                st.metric("Mean Modes / Bin",f"{np.mean(ps_lomb['raw_n_modes']):.1f}")
+                st.metric("Total Modes",int(np.sum(ps_fft["n_modes"])))
+                st.metric("Mean Modes / Bin",f"{np.mean(ps_lomb['n_modes']):.1f}")
 
             with col2:
                 st.write("")
@@ -535,14 +690,13 @@ for spec in spectra:
                 st.metric("Forest dv",f"{ps_lomb['dv_forest']:.2f}")
                 st.metric("Segment Length", f"{spec['segment_length']:.1f} h⁻¹ cMpc")
                 st.metric("Segments", len(ps_lomb["segment_ps"]))
-                st.metric("Minimum Modes / Bin", np.min(ps_lomb["raw_n_modes"]))
-                st.write(ps_lomb.keys())
-                st.metric("Mean Modes / Bin",f"{np.mean(ps_lomb['raw_n_modes']):.1f}")
+                st.metric("Total Modes",int(np.sum(ps_lomb["n_modes"])))
+                st.metric("Mean Modes / Bin",f"{np.mean(ps_lomb['n_modes']):.1f}")
 
 
             st.dataframe(pd.DataFrame({
-                "log10(k)": np.log10(ps_lomb["raw_k_bin"]),
-                "Modes": ps_lomb["raw_n_modes"]}))
+                "log10(k)": np.log10(ps_lomb["k_bin"]),
+                "Modes": ps_lomb["n_modes"]}))
             
         #-----section 4.2.4: Lyα Power Spectrum Plot
         if (ps_fft is not None and ps_lomb is not None ):
@@ -557,20 +711,47 @@ for spec in spectra:
                     xaxis_title="log₁₀(k / km⁻¹ s)",
                     yaxis_title="log₁₀(kP(k)/π)")
 
-                st.plotly_chart(fig_fft,use_container_width=True,
+                st.plotly_chart(fig_fft,width='stretch',
                     config=plotly_download_config(spec["object"],"FFTPowerSpectrum"))
             
                 fig_lomb = go.Figure()
+                                     
+                # Raw spectrum
                 fig_lomb.add_trace(go.Scatter(
                     x=np.log10(ps_lomb["k"]),
                     y=np.log10(ps_lomb["k"] * ps_lomb["pk"] / np.pi),
                     mode="lines",
-                    name="Lomb-Scargle"))
+                    name="Raw"
+                ))
+
+                # Noise spectrum
+                fig_lomb.add_trace(go.Scatter(
+                    x=np.log10(ps_lomb["k"]),
+                    y=np.log10(ps_lomb["k"] * ps_lomb["noise_pk"] / np.pi),
+                    mode="lines",
+                    name="Noise",
+                    line=dict(dash="dot")
+                ))
+
+                # Noise-corrected spectrum
+                valid = ps_lomb["pk_corrected"] > 0
+
+                fig_lomb.add_trace(go.Scatter(
+                    x=np.log10(ps_lomb["k"][valid]),
+                    y=np.log10(
+                        ps_lomb["k"][valid]
+                        * ps_lomb["pk_corrected"][valid]
+                        / np.pi
+                    ),
+                    mode="lines",
+                    name="Corrected"
+                ))
+
                 fig_lomb.update_layout(title=(f"Lomb-Scargle Power Spectrum (Window={window_pixels} px, Bins=20)"),
                     xaxis_title="log₁₀(k / km⁻¹ s)",
                     yaxis_title="log₁₀(kP(k)/π)")
 
-                st.plotly_chart(fig_lomb,use_container_width=True,
+                st.plotly_chart(fig_lomb,width='stretch',
                     config=plotly_download_config(spec["object"],"LombScarglePowerSpectrum"))
                 
             #B) Binned Power Spectra
@@ -590,26 +771,89 @@ for spec in spectra:
                     xaxis_title="log₁₀(k / km⁻¹ s)",
                     yaxis_title="log₁₀(kP(k)/π)")
 
-                st.plotly_chart(fig_fft_bin,use_container_width=True,
+                st.plotly_chart(fig_fft_bin,width='stretch',
                     config=plotly_download_config(spec["object"],"FFT_Binned_PowerSpectrum"))
 
-                # Lomb
+                # ==========================
+                # Lomb-Scargle Binned Power Spectrum
+                # ==========================
+
                 fig_lomb_bin = go.Figure()
 
+                # Masks
+                valid = np.isfinite(ps_lomb["pk_bin"])
+                empty = ~valid
+
+                # --------------------------
+                # 1. Line trace (contains NaNs -> gaps remain)
+                # --------------------------
+                fig_lomb_bin.add_trace(
+                    go.Scatter(
+                        x=np.log10(ps_lomb["k_bin"]),
+                        y=np.log10(ps_lomb["k_bin"] * ps_lomb["pk_bin"] / np.pi),
+                        mode="lines",
+                        line=dict(color="royalblue"),
+                        hoverinfo="skip",
+                        showlegend=False
+                    )
+                )
+
+                # --------------------------
+                # 2. Measured points
+                # --------------------------
+                fig_lomb_bin.add_trace(
+                    go.Scatter(
+                        x=np.log10(ps_lomb["k_bin"][valid]),
+                        y=np.log10(
+                            ps_lomb["k_bin"][valid]
+                            * ps_lomb["pk_bin"][valid]
+                            / np.pi
+                        ),
+                        mode="markers+text",
+                        marker=dict(
+                            size=8,
+                            color="royalblue"
+                        ),
+                        text=[f"n={int(n)}" for n in ps_lomb["n_modes"][valid]],
+                        textposition="top center",
+                        textfont=dict(size=10),
+                        error_y=dict(
+                            type="data",
+                            array=(
+                                ps_lomb["pk_err"][valid]
+                                / (ps_lomb["pk_bin"][valid] * np.log(10))
+                            ),
+                            visible=True
+                        ),
+                        name="Lomb Binned"
+                    )
+                )
+
+                # --------------------------
+                # 3. Empty bins (n = 0)
+                # --------------------------
+                y_cross = (np.nanmin(np.log10(ps_lomb["k_bin"][valid]* ps_lomb["pk_bin"][valid]/ np.pi)) - 0.15)
+
                 fig_lomb_bin.add_trace(go.Scatter(
-                    x=np.log10(ps_lomb["k_bin"]),
-                    y=np.log10(ps_lomb["k_bin"] * ps_lomb["pk_bin"] / np.pi),
-                    mode="markers+lines",
-                    error_y=dict(type="data",
-                        array=ps_lomb["pk_err"] / (ps_lomb["pk_bin"] * np.log(10)),
-                        visible=True),name="Lomb Binned"))
+                        x=np.log10(ps_lomb["k_bin"][empty]),
+                        y=np.full(np.sum(empty), y_cross),
+                        mode="markers+text",
+                        marker=dict(
+                            symbol="x",
+                            size=12,
+                            color="gray",
+                            line=dict(width=2)),
+                        text=["n=0"] * np.sum(empty),
+                        textposition="top center",
+                        textfont=dict(size=10,color="gray"),
+                        hovertemplate="No modes in this logarithmic k-bin<extra></extra>",
+                        showlegend=False))
 
                 fig_lomb_bin.update_layout(title=f"Lomb-Scargle Binned Power Spectrum (Window={window_pixels} px, Bins=20)",
                     xaxis_title="log₁₀(k / km⁻¹ s)",
                     yaxis_title="log₁₀(kP(k)/π)")
 
-                st.plotly_chart(fig_lomb_bin,use_container_width=True,
-                    config=plotly_download_config(spec["object"],"LombScargle_binned_PowerSpectrum"))
+                st.plotly_chart(fig_lomb_bin,width='stretch',config=plotly_download_config(spec["object"],"LombScargle_binned_PowerSpectrum"))
 
                 
             # C) FFT vs Lomb Comparison
@@ -628,20 +872,22 @@ for spec in spectra:
                     mode="lines",name="Lomb-Scargle"))
 
                 fig_compare.update_layout(
-                    title=f"FFT (Global Mean) vs Lomb-Scargle (Rolling Mean: Window={window_pixels} px, Bins=20)",
+                    title=(
+                        f"FFT vs Lomb-Scargle (Boera Method)\n"
+                        f"Rolling Mean = {window_cMpc:.0f} h⁻¹ cMpc, "
+                        f"Segment Length = {segment_length:.0f} h⁻¹ cMpc"
+                    ),
                     xaxis_title="log₁₀(k / km⁻¹ s)",
                     yaxis_title="log₁₀(kP(k)/π)")
 
-                st.plotly_chart(fig_compare,use_container_width=True,
+                st.plotly_chart(fig_compare,width='stretch',
                     config=plotly_download_config(spec["object"],"FFT_vs_LombScarglePowerSpectrum"))
 
             # D) Large-scale Power Stability Test
             with st.expander("D) Large-scale Power Stability Test"):
 
                 wave2, flux2, error2 = rebin_spectrum(wave,flux,error,factor=2)
-
                 ps_fft2 = lya_power_spectrum_fft(wave2,flux2,error2,spec["z"])
-
                 ps_lomb2 = lya_power_spectrum_lomb(wave2,flux2,error2,
                     spec["z"],spec["window_cMpc"],segment_length)
                 fig = go.Figure()
@@ -678,54 +924,123 @@ for spec in spectra:
                     xaxis_title="log₁₀(k / km⁻¹ s)",
                     yaxis_title="log₁₀(kP(k)/π)")
 
-                st.plotly_chart(fig,use_container_width=True,config=plotly_download_config(spec["object"],"LargeScalePowerStability"))
+                st.plotly_chart(fig,width='stretch',config=plotly_download_config(spec["object"],"LargeScalePowerStability"))
 
-                st.write(ps_fft["k"].min(), ps_fft["k"].max())
-                st.write(ps_fft2["k"].min(), ps_fft2["k"].max())
-                st.write(ps_lomb["k"].min(), ps_lomb["k"].max())
-                st.write(ps_lomb2["k"].min(), ps_lomb2["k"].max())
 
             #------------------------------------------------------    
+#------------------------------------------------------
             # Data Tables
             with st.expander("Data Table"):
 
-                # Raw Data Tables
+                # ==========================
+                # Raw Power Spectrum Tables
+                # ==========================
                 st.subheader("Raw Power Spectrum Tables")
+
                 fft_raw_df = pd.DataFrame({
                     "log10(k)": np.log10(ps_fft["k"]),
-                    "log10(kP(k)/π)": np.log10(ps_fft["k"] * ps_fft["pk"] / np.pi)})
+                    "log10(kP(k)/π)": np.log10(
+                        ps_fft["k"] * ps_fft["pk"] / np.pi
+                    )
+                })
+
+                # Robust logarithms for Lomb spectra
+                raw = np.full_like(ps_lomb["pk"], np.nan, dtype=float)
+                noise = np.full_like(ps_lomb["noise_pk"], np.nan, dtype=float)
+                corrected = np.full_like(ps_lomb["pk_corrected"], np.nan, dtype=float)
+
+                raw_mask = ps_lomb["pk"] > 0
+                noise_mask = ps_lomb["noise_pk"] > 0
+                corrected_mask = ps_lomb["pk_corrected"] > 0
+
+                raw[raw_mask] = np.log10(
+                    ps_lomb["k"][raw_mask]
+                    * ps_lomb["pk"][raw_mask]
+                    / np.pi
+                )
+
+                noise[noise_mask] = np.log10(
+                    ps_lomb["k"][noise_mask]
+                    * ps_lomb["noise_pk"][noise_mask]
+                    / np.pi
+                )
+
+                corrected[corrected_mask] = np.log10(
+                    ps_lomb["k"][corrected_mask]
+                    * ps_lomb["pk_corrected"][corrected_mask]
+                    / np.pi
+                )
+
                 lomb_raw_df = pd.DataFrame({
                     "log10(k)": np.log10(ps_lomb["k"]),
-                    "log10(kP(k)/π)": np.log10(ps_lomb["k"] * ps_lomb["pk"] / np.pi)})
+                    "Raw": raw,
+                    "Noise": noise,
+                    "Corrected": corrected
+                })
+
                 col1, col2 = st.columns(2)
+
                 with col1:
                     st.markdown("### FFT Raw")
-                    st.dataframe(fft_raw_df,height=300,use_container_width=True)
+                    st.dataframe(
+                        fft_raw_df,
+                        height=300,
+                        width='stretch'
+                    )
+
                 with col2:
                     st.markdown("### Lomb-Scargle Raw")
-                    st.dataframe(lomb_raw_df,height=300,use_container_width=True)
+                    st.dataframe(
+                        lomb_raw_df,
+                        height=300,
+                        width='stretch'
+                    )
 
-                # Binned Data Tables
+                # ==========================
+                # Binned Power Spectrum Tables
+                # ==========================
                 st.subheader("Binned Power Spectrum Tables")
+
                 fft_bin_df = pd.DataFrame({
                     "log10(k)": np.log10(ps_fft["k_bin"]),
-                    "log10(kP(k)/π)": np.log10(ps_fft["k_bin"] * ps_fft["pk_bin"] / np.pi),
-                    "σ(P)": ps_fft["pk_err"]})
+                    "log10(kP(k)/π)": np.log10(
+                        ps_fft["k_bin"] * ps_fft["pk_bin"] / np.pi
+                    ),
+                    "σ(P)": ps_fft["pk_err"]
+                })
+
+                binned = np.full_like(ps_lomb["pk_bin"], np.nan, dtype=float)
+
+                valid = ps_lomb["pk_bin"] > 0
+
+                binned[valid] = np.log10(
+                    ps_lomb["k_bin"][valid]
+                    * ps_lomb["pk_bin"][valid]
+                    / np.pi
+                )
 
                 lomb_bin_df = pd.DataFrame({
                     "log10(k)": np.log10(ps_lomb["k_bin"]),
-                    "log10(kP(k)/π)": np.log10(ps_lomb["k_bin"] * ps_lomb["pk_bin"] / np.pi),
-                    "σ(P)": ps_lomb["pk_err"]})
-                
+                    "log10(kP(k)/π)": binned,
+                    "σ(P)": ps_lomb["pk_err"],
+                    "Modes": ps_lomb["n_modes"]
+                })
+
                 col1, col2 = st.columns(2)
 
                 with col1:
                     st.markdown("### FFT Binned")
-                    st.dataframe(fft_bin_df,use_container_width=True)
+                    st.dataframe(
+                        fft_bin_df,
+                        width='stretch'
+                    )
 
                 with col2:
                     st.markdown("### Lomb-Scargle Binned")
-                    st.dataframe(lomb_bin_df,use_container_width=True)
+                    st.dataframe(
+                        lomb_bin_df,
+                        width='stretch'
+                    )
 
         #-----section 4.2.5: Rolling Mean Diagnostics
         if ps_lomb is not None:
@@ -747,7 +1062,7 @@ for spec in spectra:
 
                 fig_roll.update_layout(title=f"Flux and Rolling Mean (Window = {window_pixels} pixels)",xaxis_title="Rest Wavelength (Å)",yaxis_title="Flux")
                     
-                st.plotly_chart(fig_roll,use_container_width=True)
+                st.plotly_chart(fig_roll,width='stretch')
 
                 # Plot B : Flux Contrast
                 st.markdown("#### Rolling-Mean Normalized Flux Contrast")
@@ -758,7 +1073,7 @@ for spec in spectra:
                         mode="lines",name="δF"))
 
                 fig_delta.update_layout(title=f"δF = Flux / Rolling Mean - 1 (Window = {window_pixels} pixels)",xaxis_title="Rest Wavelength (Å)",yaxis_title="δF")
-                st.plotly_chart(fig_delta,use_container_width=True)
+                st.plotly_chart(fig_delta,width='stretch')
 
         #-----section 4.2.6:Flux Spectrum
         with st.expander("Flux Spectrum"):
@@ -775,7 +1090,7 @@ for spec in spectra:
                 yaxis_title="Flux")
 
             fig1.update_yaxes(tickformat=".2e")
-            st.plotly_chart(fig1,use_container_width=True)
+            st.plotly_chart(fig1,width='stretch')
             
         #-----section 4.2.7:Signal-to-Noise Plot
         with st.expander("Signal to Noise Ratio",expanded=False):
@@ -786,7 +1101,7 @@ for spec in spectra:
             fig2.update_layout(title="Signal-to-Noise Ratio",
                 xaxis_title="Observed Wavelength (Å)",
                 yaxis_title="S/N")
-            st.plotly_chart(fig2,use_container_width=True)
+            st.plotly_chart(fig2,width='stretch')
         
         #-----section 4.2.8:Text Analysis
         st.write(f"This {spec['instrument']} spectrum contains {len(flux):,} pixels. The median S/N is {spec['median_snr']:.2f}, which corresponds to {quality_label(spec['median_snr'])} data quality. The masked fraction is {spec['masked_fraction']:.2f}% and the velocity spacing is {spec['dv']:.2f} km/s.")
@@ -794,8 +1109,6 @@ for spec in spectra:
         #-----section 4.2.9: FITS Header
         with st.expander("FITS Header"):
             st.json(dict(spec["header"]))
-
-
 
 #-----------------------------------------------------------------------------------------------------------------------
 #-----section 5: Testing the Pipeline------------------------------------
@@ -820,25 +1133,61 @@ with st.expander("White Noise Validation Test", expanded=False):
     #---------------------------------------------------------
     # Generate White Noise
     #---------------------------------------------------------
-    N = st.number_input("Number of points",value=5000)
-    dv = st.number_input("dv=",value=2.5)
+    N = st.number_input("Number of points", value=5000)
 
-    sigma=st.number_input(r"$\sigma$ =",value=1)
+    dv = st.number_input("dv (km/s)", value=2.5)
+
+    sigma = st.number_input(r"$\sigma$", value=0.05)
+
+    z_test = 5.0
+
+    wave_rest = np.linspace(1040,1180,N)
+    wave_obs = wave_rest * (1 + z_test)
+
+    true_flux = np.ones(N)
+
+    noise = np.random.normal(0, sigma, N)
+
+    flux = true_flux + noise
+
+    error = sigma * np.ones(N)
 
     velocity = np.arange(N) * dv
-    deltaF = np.random.normal(0, sigma, N)
+    deltaF = noise
+
     expected_power = sigma**2 * dv
-    
+
+    # FFT unit test
     fft_test = power_spectrum_fft(deltaF, dv)
-    lomb_test = power_spectrum_lomb(velocity, deltaF, dv)  
 
+    # Full Boera pipeline
+    ps_lomb = lya_power_spectrum_lomb(
+        wave_obs,
+        flux,
+        error,
+        z_test,
+        window_cMpc,
+        segment_length
+    )
     st.subheader("Validation Statistics")
+
     st.write(f"σ = {sigma:.4f}")
-    st.write(f"Expected <P(k)> = σ² dv = {expected_power:.4f}")
+
+    st.write(f"Expected FFT <P(k)> = σ²Δv = {expected_power:.4f}")
+
     st.write(f"FFT Mean = {np.mean(fft_test['pk']):.4f}")
-    st.write(f"Lomb Mean = {np.mean(lomb_test['pk']):.4f}")
 
+    st.write("")
 
+    st.markdown("### Corrected Lomb Pipeline")
+
+    st.write(f"Mean Raw Power = {np.mean(ps_lomb['pk']):.4f}")
+
+    st.write(f"Mean Noise Power = {np.mean(ps_lomb['noise_pk']):.4f}")
+
+    st.write(f"Mean Corrected Power = {np.mean(ps_lomb['pk_corrected']):.4f}")
+
+    st.write(f"Mean Final Binned Power = {np.nanmean(ps_lomb['pk_bin']):.4f}")
     #---------------------------------------------------------
     # A) White Noise Signal
     #---------------------------------------------------------
@@ -853,71 +1202,99 @@ with st.expander("White Noise Validation Test", expanded=False):
             xaxis_title="Velocity (km/s)",
             yaxis_title="δF")
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         
     #---------------------------------------------------------
     # B) Binned P(k)
     #---------------------------------------------------------
-    with st.expander("B) Binned P(k)", expanded=True):
-        
-        valid_fft = (np.isfinite(fft_test["k"])
-            & np.isfinite(fft_test["pk"])
-            & (fft_test["k"] > 0)
-            & (fft_test["pk"] > 0))
+    with st.expander("B) FFT vs Corrected Lomb", expanded=True):
 
-        valid_lomb = (np.isfinite(lomb_test["k"])
-            & np.isfinite(lomb_test["pk"])
-            & (lomb_test["k"] > 0)
-            & (lomb_test["pk"] > 0))
-        #creating 21 bins 
-        fft_bins = np.linspace(
-            np.log10(fft_test["k"][valid_fft]).min(),
-            np.log10(fft_test["k"][valid_fft]).max(),21)
-        lomb_bins = np.linspace(
-            np.log10(lomb_test["k"][valid_lomb]).min(),
-            np.log10(lomb_test["k"][valid_lomb]).max(),21)
-
-        fft_x = []
-        fft_y = []
-
-        for i in range(20):
-            m = ((np.log10(fft_test["k"][valid_fft]) >= fft_bins[i])&
-                (np.log10(fft_test["k"][valid_fft]) < fft_bins[i+1]))
-            
-            if np.sum(m):
-                fft_x.append(np.mean(np.log10(fft_test["k"][valid_fft][m])))
-                pk_values = fft_test["pk"][valid_fft][m]
-                fft_y.append(np.log10(np.mean(pk_values)))
-
-        lomb_x = []
-        lomb_y = []
-
-        for i in range(20):
-            m = ((np.log10(lomb_test["k"][valid_lomb]) >= lomb_bins[i])&
-                (np.log10(lomb_test["k"][valid_lomb]) < lomb_bins[i+1]))
-            
-            if np.sum(m):
-                lomb_x.append(np.mean(np.log10(lomb_test["k"][valid_lomb][m])))
-                pk_values = lomb_test["pk"][valid_lomb][m]
-                lomb_y.append(np.log10(np.mean(pk_values)))
-                
         fig = go.Figure()
-        
-        fig.add_trace(go.Scatter(x=fft_x,y=fft_y,
-                mode="markers+lines",name="FFT"))
-        
-        fig.add_hline(y=np.log10(expected_power),
-            line_dash="dash",line_color="black",
-            annotation_text="Expected <P(k)> = σ² dv")
-        
-        fig.add_trace(go.Scatter(x=lomb_x,y=lomb_y,
-                mode="markers+lines",name="Lomb-Scargle"))
 
-        fig.update_layout(title="White Noise Binned Power Spectrum",
-            xaxis_title="log₁₀(k / km⁻¹ s)",
-            yaxis_title="log₁₀(P(k))")
+        # FFT
+        fig.add_trace(
+            go.Scatter(
+                x=np.log10(fft_test["k_bin"]),
+                y=np.log10(fft_test["k_bin"] * fft_test["pk_bin"] / np.pi),
+                mode="markers+lines",
+                name="FFT"
+            )
+        )
 
-        st.plotly_chart(fig, use_container_width=True)
+        valid = ps_lomb["pk_bin"] > 0
+
+        fig.add_trace(
+            go.Scatter(
+                x=np.log10(ps_lomb["k_bin"][valid]),
+                y=np.log10(
+                    ps_lomb["k_bin"][valid]
+                    * ps_lomb["pk_bin"][valid]
+                    / np.pi
+                ),
+                mode="markers+lines",
+                name="Corrected Lomb"
+            )
+        )
+
+        fig.add_hline(
+            y=np.log10(expected_power),
+            line_dash="dash",
+            annotation_text="σ²Δv"
+        )
+
+        fig.update_layout(
+            title="FFT vs Corrected Lomb Pipeline",
+            xaxis_title="log10(k)",
+            yaxis_title="log10(kP(k)/π)"
+        )
+
+        st.plotly_chart(fig, width='stretch')
+
+    with st.expander("C) Raw / Noise / Corrected Lomb", expanded=True):
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Scatter(
+                x=np.log10(ps_lomb["k"]),
+                y=np.log10(ps_lomb["k"] * ps_lomb["pk"] / np.pi),
+                mode="lines",
+                name="Raw"
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=np.log10(ps_lomb["k"]),
+                y=np.log10(ps_lomb["k"] * ps_lomb["noise_pk"] / np.pi),
+                mode="lines",
+                line=dict(dash="dot"),
+                name="Noise"
+            )
+        )
+
+        valid = ps_lomb["pk_corrected"] > 0
+
+        fig.add_trace(
+            go.Scatter(
+                x=np.log10(ps_lomb["k"][valid]),
+                y=np.log10(
+                    ps_lomb["k"][valid]
+                    * ps_lomb["pk_corrected"][valid]
+                    / np.pi
+                ),
+                mode="lines",
+                name="Corrected"
+            )
+        )
+
+        fig.update_layout(
+            title="Corrected Lomb Pipeline",
+            xaxis_title="log10(k)",
+            yaxis_title="log10(kP(k)/π)"
+        )
+
+        st.plotly_chart(fig, width='stretch')
 
     #---------------------------------------------------------
     # C) White Noise Rebinning Test
@@ -958,75 +1335,131 @@ with st.expander("White Noise Validation Test", expanded=False):
 
             # Recompute both power spectra
             fft_rebin = power_spectrum_fft(deltaF_rebin,dv_rebin)
-            lomb_rebin = power_spectrum_lomb(velocity_rebin,deltaF_rebin,dv_rebin)
+            # FFT plotting arrays
+            valid_fft = (
+                np.isfinite(fft_test["k_bin"])
+                & np.isfinite(fft_test["pk_bin"])
+                & (fft_test["pk_bin"] > 0)
+            )
 
+            fft_x = np.log10(
+                fft_test["k_bin"][valid_fft]
+            )
+
+            fft_y = np.log10(
+                fft_test["pk_bin"][valid_fft]
+            )
+
+            valid_fft_rebin = (
+                np.isfinite(fft_rebin["k_bin"])
+                & np.isfinite(fft_rebin["pk_bin"])
+                & (fft_rebin["pk_bin"] > 0)
+            )
+
+            fft_rebin_x = np.log10(
+                fft_rebin["k_bin"][valid_fft_rebin]
+            )
+
+            fft_rebin_y = np.log10(
+                fft_rebin["pk_bin"][valid_fft_rebin]
+            )
+            wave_rest_rebin = wave_rest[:n_use].reshape(-1,b).mean(axis=1)
+
+            wave_obs_rebin = wave_rest_rebin * (1 + z_test)
+
+            flux_rebin = flux[:n_use].reshape(-1,b).mean(axis=1)
+
+            error_rebin = (
+                np.sqrt(
+                    np.sum(error[:n_use].reshape(-1,b)**2, axis=1)
+                ) / b
+            )
+
+            ps_lomb_rebin = lya_power_spectrum_lomb(
+                wave_obs_rebin,
+                flux_rebin,
+                error_rebin,
+                z_test,
+                window_cMpc,
+                segment_length
+            )
             # Measured variances
             variance_original = np.var(deltaF)
             variance_rebin = np.var(deltaF_rebin)
 
-            # Mean measured power-spectrum amplitudes
+            #-----------------------------------------------------
+            # FFT statistics
+            #-----------------------------------------------------
+
             fft_original_mean = np.mean(fft_test["pk"])
             fft_rebin_mean = np.mean(fft_rebin["pk"])
 
-            lomb_original_mean = np.mean(lomb_test["pk"])
-            lomb_rebin_mean = np.mean(lomb_rebin["pk"])
-
-            # Expected rebinned values
             fft_expected_rebin = fft_original_mean
+
+            fft_ratio = fft_rebin_mean / fft_expected_rebin
+
+            fft_percent_change = (
+                100
+                * (fft_rebin_mean - fft_original_mean)
+                / fft_original_mean
+            )
+
+            #-----------------------------------------------------
+            # Corrected Lomb statistics
+            #-----------------------------------------------------
+
+            lomb_original_mean = np.nanmean(ps_lomb["pk_bin"])
+
+            lomb_rebin_mean = np.nanmean(ps_lomb_rebin["pk_bin"])
+
             lomb_expected_rebin = lomb_original_mean
 
+            lomb_ratio = lomb_rebin_mean / lomb_expected_rebin
 
-            fft_ratio = (fft_rebin_mean/ fft_expected_rebin)
-            lomb_ratio = (lomb_rebin_mean / lomb_expected_rebin)
+            lomb_percent_change = (
+                100
+                * (lomb_rebin_mean - lomb_original_mean)
+                / lomb_original_mean
+            )
 
+            #-----------------------------------------------------
+            # Plotting arrays
+            #-----------------------------------------------------
 
-            fft_percent_change = (100* (fft_rebin_mean - fft_original_mean)/ fft_original_mean)
+            valid_original = (
+                np.isfinite(ps_lomb["k_bin"])
+                & np.isfinite(ps_lomb["pk_bin"])
+                & (ps_lomb["pk_bin"] > 0)
+            )
 
-            lomb_percent_change = (100* (lomb_rebin_mean - lomb_original_mean)/ lomb_original_mean)
+            lomb_x = np.log10(ps_lomb["k_bin"][valid_original])
 
+            lomb_y = np.log10(
+                ps_lomb["pk_bin"][valid_original]
+            )
 
-            valid_fft_rebin = (np.isfinite(fft_rebin["k"])& np.isfinite(fft_rebin["pk"])
-                & (fft_rebin["k"] > 0) & (fft_rebin["pk"] > 0))
+            valid_rebin = (
+                np.isfinite(ps_lomb_rebin["k_bin"])
+                & np.isfinite(ps_lomb_rebin["pk_bin"])
+                & (ps_lomb_rebin["pk_bin"] > 0)
+            )
 
-            fft_rebin_bins = np.linspace(np.log10(fft_rebin["k"][valid_fft_rebin]).min(),
-                np.log10(fft_rebin["k"][valid_fft_rebin]).max(),21)
+            lomb_rebin_x = np.log10(
+                ps_lomb_rebin["k_bin"][valid_rebin]
+            )
 
-            fft_rebin_x = []
-            fft_rebin_y = []
+            lomb_rebin_y = np.log10(
+                ps_lomb_rebin["pk_bin"][valid_rebin]
+            )
 
-            for i in range(20):
-                logk_values = np.log10(fft_rebin["k"][valid_fft_rebin])
-                m = ((logk_values >= fft_rebin_bins[i]) & (logk_values < fft_rebin_bins[i + 1]))
-
-                if np.sum(m):
-                    fft_rebin_x.append(np.mean(logk_values[m]))
-                    pk_values = (fft_rebin["pk"][valid_fft_rebin][m])
-                    fft_rebin_y.append(np.log10(np.mean(pk_values)))
-
-
-            valid_lomb_rebin = (np.isfinite(lomb_rebin["k"]) & np.isfinite(lomb_rebin["pk"])
-                & (lomb_rebin["k"] > 0) & (lomb_rebin["pk"] > 0))
-
-            lomb_rebin_bins = np.linspace(
-                np.log10(lomb_rebin["k"][valid_lomb_rebin]).min(),
-                np.log10(lomb_rebin["k"][valid_lomb_rebin]).max(),21)
-
-            lomb_rebin_x = []
-            lomb_rebin_y = []
-
-            for i in range(20):
-                logk_values = np.log10(lomb_rebin["k"][valid_lomb_rebin])
-                m = ((logk_values >= lomb_rebin_bins[i]) & (logk_values < lomb_rebin_bins[i + 1]))
-
-                if np.sum(m):
-                    lomb_rebin_x.append(np.mean(logk_values[m]))
-                    pk_values = (lomb_rebin["pk"][valid_lomb_rebin][m])
-                    lomb_rebin_y.append(np.log10(np.mean(pk_values)))
-
+            #-----------------------------------------------------
+            # Store results
+            #-----------------------------------------------------
 
             st.session_state["white_noise_rebin_result"] = {
+
                 "b": b,
-                
+
                 "variance_original": variance_original,
                 "variance_rebin": variance_rebin,
 
@@ -1045,8 +1478,12 @@ with st.expander("White Noise Validation Test", expanded=False):
                 "fft_rebin_x": fft_rebin_x,
                 "fft_rebin_y": fft_rebin_y,
 
+                "lomb_x": lomb_x,
+                "lomb_y": lomb_y,
+
                 "lomb_rebin_x": lomb_rebin_x,
-                "lomb_rebin_y": lomb_rebin_y}
+                "lomb_rebin_y": lomb_rebin_y,
+            }
 
 
         if "white_noise_rebin_result" in st.session_state:
@@ -1064,7 +1501,7 @@ with st.expander("White Noise Validation Test", expanded=False):
                 "Rebinned / Original": [result["fft_ratio"],result["lomb_ratio"]],
                 "Change (%)": [result["fft_percent_change"],result["lomb_percent_change"]]})
 
-            st.dataframe(rebin_stats,hide_index=True,use_container_width=True)
+            st.dataframe(rebin_stats,hide_index=True,width='stretch')
 
             variance_ratio = (result["variance_rebin"]/ result["variance_original"])
 
@@ -1087,16 +1524,18 @@ with st.expander("White Noise Validation Test", expanded=False):
 
             # Original Lomb
             fig.add_trace(go.Scatter(
-                    x=lomb_x,y=lomb_y,
-                    mode="markers+lines",
-                    name="Lomb Original",
-                    line=dict(dash="dot")))
+                x=result["lomb_x"],
+                y=result["lomb_y"],
+                mode="markers+lines",
+                name="Corrected Lomb Original",
+                line=dict(dash="dot")
+            ))
 
             # Rebinned Lomb
             fig.add_trace(go.Scatter(
                     x=result["lomb_rebin_x"],y=result["lomb_rebin_y"],
                     mode="markers+lines",
-                    name="Lomb Rebinned"))
+                    name="Corrected Lomb Rebinned"))
 
             fig.add_hline(y=np.log10(expected_power),
                 line_dash="dash",line_color="black",annotation_text="σ²Δv")
@@ -1106,581 +1545,245 @@ with st.expander("White Noise Validation Test", expanded=False):
                 xaxis_title="log₁₀(k / km⁻¹ s)",
                 yaxis_title="log₁₀(P(k))")
 
-            st.plotly_chart(fig,use_container_width=True)
+            st.plotly_chart(fig,width='stretch')
+ 
     #---------------------------------------------------------
     # D) White Noise Masking Test
     #---------------------------------------------------------
     with st.expander("D) White Noise Masking Test", expanded=False):
 
-        st.markdown("""This test checks whether masking contiguous sections of white noise
-        changes the power-spectrum amplitude recovered by the Lomb–Scargle pipeline.
-        Three power spectra are compared:
-        1. The original unmasked white noise through the existing pipeline.
-        2. The masked white noise through the existing pipeline.
-        3. The same masked white noise evaluated on the original k-grid.
-        The third calculation is a diagnostic test. It helps determine whether
-        differences after masking are caused by the frequency-grid construction
-        or by masking itself.""")
+        st.markdown("""
+    This test checks whether masking contiguous regions changes the
+    final corrected Lomb–Scargle power spectrum.
 
+    The complete Boera pipeline is run for
 
-        st.latex(r"P_{\rm original}(k)"
-            r"\quad \mathrm{vs.} \quad P_{\rm masked,pipeline}(k) \quad \mathrm{vs.} \quad"
-            r"P_{\rm masked,same\text{-}grid}(k)")
+    • the original spectrum
 
+    • the masked spectrum
 
-        with st.form("white_noise_masking_form"):
-            mask_fraction_input = st.slider("Masked fraction",
-                min_value=0.05,
-                max_value=0.50,
-                value=0.20,
-                step=0.05)
+    The corrected, binned spectra should agree within statistical scatter.
+    """)
 
-            n_mask_regions_input = st.number_input("Number of contiguous masked regions",
-                min_value=1,
-                max_value=20,
-                value=5,step=1)
+        with st.form("masking_form"):
 
-            run_masking = st.form_submit_button("Run Masking Test")
+            mask_fraction = st.slider(
+                "Masked fraction",
+                0.05,
+                0.50,
+                0.20,
+                0.05
+            )
 
-        if run_masking:
-            mask_fraction = float(mask_fraction_input)
-            n_mask_regions = int(n_mask_regions_input)
-            N_mask = len(deltaF)
+            n_regions = st.number_input(
+                "Number of masked regions",
+                1,
+                20,
+                5
+            )
 
-            # Exact total number of pixels to mask
-            n_mask_total = int(round(mask_fraction * N_mask))
-            n_mask_regions = min(n_mask_regions,n_mask_total)
+            run_mask = st.form_submit_button("Run Masking Test")
 
-            # Divide the total masked pixels among regions
-            # This guarantees:
-            # sum(region_sizes) == n_mask_total
-            base_gap_size = (n_mask_total// n_mask_regions)
-            remainder = (n_mask_total % n_mask_regions)
-            region_sizes = np.full(n_mask_regions,base_gap_size,dtype=int)
-            region_sizes[:remainder] += 1
+        if run_mask:
 
+            rng = np.random.default_rng(42)
 
-            # Create non-overlapping contiguous masks
-            # The complete array is divided into separate sections. One gap is randomly placed in eachsection.
-            mask_rng = np.random.default_rng(42)
-            mask = np.zeros(N_mask,dtype=bool)
-            section_edges = np.linspace(0,N_mask,n_mask_regions + 1,dtype=int)
+            Npix = len(flux)
 
+            n_mask = int(mask_fraction * Npix)
 
-            for i in range(n_mask_regions):
-                section_start = section_edges[i]
-                section_stop = section_edges[i + 1]
-                gap_size = region_sizes[i]
-                max_start = (section_stop- gap_size)
-                start = mask_rng.integers(section_start,max_start + 1)
-                stop = (start+ gap_size)
-                mask[start:stop] = True
-            
-            velocity_masked = velocity[~mask]
-            deltaF_masked = deltaF[~mask]
-            actual_mask_fraction = np.mean(mask)
+            mask = np.zeros(Npix,dtype=bool)
 
-            # CALCULATION 1
-            # ORIGINAL WHITE NOISE Already calculated earlier
+            section_edges = np.linspace(
+                0,
+                Npix,
+                n_regions+1,
+                dtype=int
+            )
 
-            lomb_original = lomb_test
+            base = n_mask // n_regions
+            remainder = n_mask % n_regions
 
-            # CALCULATION 2
-            # MASKED WHITE NOISE THROUGH ACTUAL PIPELINE
+            sizes = np.full(n_regions,base)
 
-            lomb_masked_pipeline = power_spectrum_lomb(velocity_masked,deltaF_masked,dv)
+            sizes[:remainder]+=1
 
+            for i in range(n_regions):
 
-            # CALCULATION 3
-            # MASKED WHITE NOISE ON ORIGINAL k-GRID
-            # Diagnostic calculation only.
-            
-            k_same_grid = lomb_original["k"]
-            frequency_same_grid = (k_same_grid/ (2 * np.pi))
-            ls_same_grid = LombScargle(velocity_masked,deltaF_masked,normalization="psd")
+                start_section = section_edges[i]
+                stop_section = section_edges[i+1]
 
-            pk_masked_same_grid = ls_same_grid.power(frequency_same_grid)
+                gap = sizes[i]
 
+                start = rng.integers(
+                    start_section,
+                    stop_section-gap+1
+                )
 
-            # Same normalization correction currently used
-            # by your power_spectrum_lomb() function.
-            pk_masked_same_grid *= dv
+                mask[start:start+gap]=True
 
-            # Mean P(k) amplitudes
-            original_mean = np.mean(lomb_original["pk"])
-            pipeline_mean = np.mean(lomb_masked_pipeline["pk"])
-            same_grid_mean = np.mean(pk_masked_same_grid)
-            
-            # Ratios  Desired values ≈ 1
-            pipeline_ratio = (pipeline_mean / original_mean)
-            same_grid_ratio = (same_grid_mean/ original_mean)
+            wave_mask = wave_obs[~mask]
 
-            # Percentage changes
-            pipeline_percent_change = 100 * (pipeline_mean - original_mean) / original_mean
-            same_grid_percent_change = 100 * (same_grid_mean - original_mean) / original_mean
-            
-            #=====================================================
-            # BIN ALL THREE P(k) SPECTRA
-            # Average P(k) in linear space first, then take log10 for plotting.
-            #=====================================================
+            flux_mask = flux[~mask]
 
+            error_mask = error[~mask]
 
-            #-----------------------------------------------------
-            # Helper used ONLY for display binning.
-            #
-            # This does not change the power-spectrum physics.
-            #-----------------------------------------------------
+            ps_mask = lya_power_spectrum_lomb(
+                wave_mask,
+                flux_mask,
+                error_mask,
+                z_test,
+                window_cMpc,
+                segment_length
+            )
 
-            def bin_pk_for_display(k, pk, n_bins=20):
-                valid = (np.isfinite(k) & np.isfinite(pk) & (k > 0)& (pk > 0))
-                k_valid = k[valid]
-                pk_valid = pk[valid]
-                logk = np.log10(k_valid)
+            ratio = (
+                np.nanmean(ps_mask["pk_bin"])
+                /
+                np.nanmean(ps_lomb["pk_bin"])
+            )
 
-                bins = np.linspace(logk.min(),logk.max(),n_bins + 1)
-                x_bin = []
-                y_bin = []
+            st.write(f"Masked fraction = {mask_fraction:.2f}")
 
-                for i in range(n_bins):
-                    m = ((logk >= bins[i]) & (logk < bins[i + 1]))
-                    if np.sum(m):
-                        x_bin.append(np.mean(logk[m]))
-                        y_bin.append(np.log10(np.mean(pk_valid[m])))
-                return (np.asarray(x_bin),np.asarray(y_bin))
+            st.write(f"Mean power ratio = {ratio:.3f}")
 
-            # Original pipeline output
-            original_x, original_y = (bin_pk_for_display(lomb_original["k"],lomb_original["pk"]))
+            fig = go.Figure()
 
-            # Masked actual-pipeline output
-            pipeline_x, pipeline_y = (bin_pk_for_display(lomb_masked_pipeline["k"],lomb_masked_pipeline["pk"]))
+            valid1 = ps_lomb["pk_bin"]>0
 
-            # Masked same-grid output
-            same_grid_x, same_grid_y = (bin_pk_for_display(k_same_grid,pk_masked_same_grid))
+            valid2 = ps_mask["pk_bin"]>0
 
-            #=====================================================
-            # STORE RESULT
-            #
-            # Prevent expensive calculations from rerunning
-            # whenever Streamlit reruns the script.
-            #=====================================================
+            fig.add_trace(
+                go.Scatter(
+                    x=np.log10(ps_lomb["k_bin"][valid1]),
+                    y=np.log10(
+                        ps_lomb["k_bin"][valid1]
+                        *ps_lomb["pk_bin"][valid1]
+                        /np.pi
+                    ),
+                    mode="lines",
+                    name="Original"
+                )
+            )
 
-            st.session_state["white_noise_mask_three_curve_result"] = {
-                "requested_mask_fraction":mask_fraction,
-                "actual_mask_fraction":actual_mask_fraction,
-                "n_mask_regions":n_mask_regions,
-                "n_original":len(deltaF),
-                "n_retained":len(deltaF_masked),
-                "original_mean":original_mean,
-                "pipeline_mean":pipeline_mean,
-                "same_grid_mean":same_grid_mean,
-                "pipeline_ratio":pipeline_ratio,
-                "same_grid_ratio":same_grid_ratio,
-                "pipeline_percent_change":pipeline_percent_change,
-                "same_grid_percent_change":same_grid_percent_change,
-                "velocity":velocity,
-                "deltaF":deltaF,
-                "velocity_masked":velocity_masked,
-                "deltaF_masked":deltaF_masked,
-                "original_x":original_x,
-                "original_y":original_y,
-                "pipeline_x":pipeline_x,
-                "pipeline_y":pipeline_y,
-                "same_grid_x":same_grid_x,
-                "same_grid_y":same_grid_y}
+            fig.add_trace(
+                go.Scatter(
+                    x=np.log10(ps_mask["k_bin"][valid2]),
+                    y=np.log10(
+                        ps_mask["k_bin"][valid2]
+                        *ps_mask["pk_bin"][valid2]
+                        /np.pi
+                    ),
+                    mode="lines",
+                    name="Masked"
+                )
+            )
 
-        if ("white_noise_mask_three_curve_result" in st.session_state):
-            result = st.session_state["white_noise_mask_three_curve_result"]
+            fig.update_layout(
+                title="Corrected Lomb Pipeline After Masking",
+                xaxis_title="log10(k)",
+                yaxis_title="log10(kP(k)/π)"
+            )
 
-            # Statistics Table
-            st.subheader("Masking Statistics")
-            mask_stats = pd.DataFrame({
-                "Calculation": ["Original Lomb", "Masked Lomb (Pipeline Grid)", "Masked Lomb (Original k-grid)"],
-                "Mean P(k)": [result["original_mean"],result["pipeline_mean"],result["same_grid_mean"]],
-                "Relative to Original": [1.0,result["pipeline_ratio"],result["same_grid_ratio"]],
-                "Change (%)": [0.0,result["pipeline_percent_change"],result["same_grid_percent_change"]]})
+            st.plotly_chart(fig,width='stretch')
 
-
-            st.dataframe(mask_stats,hide_index=True,use_container_width=True)
-
-            st.write(f"Requested masked fraction ={result['requested_mask_fraction']:.4f}")
-            st.write(f"Actual masked fraction = {result['actual_mask_fraction']:.4f}")
-            st.write(f"Original pixels = {result['n_original']}")
-            st.write(f"Retained pixels = {result['n_retained']}")
-
-
-            st.markdown("""**Interpretation**
-            - If both masked calculations remain close to the original power, the existing Lomb–Scargle pipeline is robust to masking.
-            - If the original-k-grid calculation is closer to the original power than the pipeline-grid calculation, the frequency-grid
-              construction may contribute to the masking bias.
-            - If both masked calculations change similarly, the difference is
-              more likely associated with the sampling window or the Lomb–Scargle estimator itself.""")
-
-            # Mask Visualization
-
-            fig_mask = go.Figure()
-            fig_mask.add_trace(go.Scattergl(
-                    x=result["velocity"],y=result["deltaF"],
-                    mode="lines",name="Original Noise"))
-            
-            fig_mask.add_trace(go.Scattergl(
-                    x=result["velocity_masked"],
-                    y=result["deltaF_masked"],
-                    mode="markers",
-                    name="Retained Samples",
-                    marker=dict(size=2)))
-            fig_mask.update_layout(
-                title=("White Noise after Masking Contiguous Sections"),
-                xaxis_title="Velocity (km/s)",yaxis_title="δF")
-            st.plotly_chart(fig_mask,use_container_width=True)
-
-            #-----------------------------------------------------
-            # THREE-CURVE P(k) COMPARISON
-            #-----------------------------------------------------
-            fig_compare_mask = go.Figure()
-            # Original
-            fig_compare_mask.add_trace(go.Scatter(
-                    x=result["original_x"],
-                    y=result["original_y"],
-                    mode="markers+lines",
-                    name="Original Lomb",
-                    line=dict(dash="dot")))
-
-            # Masked through actual pipeline
-            fig_compare_mask.add_trace(go.Scatter(
-                    x=result["pipeline_x"],
-                    y=result["pipeline_y"],
-                    mode="markers+lines",
-                    name="Masked Lomb (Pipeline Grid)"))
-
-            # Masked evaluated on original grid
-            fig_compare_mask.add_trace(go.Scatter(
-                    x=result["same_grid_x"],
-                    y=result["same_grid_y"],
-                    mode="markers+lines",
-                    name="Masked Lomb (Original k-grid)",
-                    line=dict(dash="dash")))
-            #-----------------------------------------------------
-            # Original measured mean P(k) reference
-            #-----------------------------------------------------
-            fig_compare_mask.add_hline(
-                y=np.log10(result["original_mean"]),
-                line_dash="dash",
-                line_color="black",
-                annotation_text=("Original Mean P(k)"))
-            
-            fig_compare_mask.update_layout(
-                title=("Masking Diagnostic: Pipeline Grid vs Original k-grid"),
-                xaxis_title=("log₁₀(k / km⁻¹ s)"),yaxis_title=("log₁₀(P(k))"))
-
-            st.plotly_chart(fig_compare_mask,use_container_width=True)
 
 
     #---------------------------------------------------------
     # E) Monte Carlo Masking Validation
     #---------------------------------------------------------
-    with st.expander("E) Monte Carlo Masking Validation", expanded=False):
+    with st.expander("E) Monte Carlo Masking Validation",expanded=False):
 
-        st.latex(r"R_{\rm pipeline}= \frac{\langle P_{\rm masked,pipeline}(k)\rangle} {\langle P_{\rm original}(k)\rangle}")
-        st.latex(r"R_{\rm same-grid}= \frac{\langle P_{\rm masked,same-grid}(k)\rangle} {\langle P_{\rm original}(k)\rangle}")
-        st.markdown("""A successful masking test should give a mean ratio close to 1. Smaller scatter indicates greater realization-to-realization stability.""")
+        n_realizations = st.number_input(
+            "Number of realizations",
+            10,
+            500,
+            100,
+            10
+        )
 
-        with st.form("monte_carlo_masking_form"):
-            n_realizations_input = st.number_input("Number of white-noise realizations",min_value=10, max_value=1000, value=100, step=10)
-            mc_mask_fraction_input = st.slider("Monte Carlo masked fraction",min_value=0.05, max_value=0.50, value=0.20, step=0.05)
-            mc_n_regions_input = st.number_input("Number of contiguous masked regions",min_value=1, max_value=20, value=3, step=1)
-            run_monte_carlo = st.form_submit_button("Run Monte Carlo Test")
+        if st.button("Run Monte Carlo"):
 
+            ratios=[]
 
-        if run_monte_carlo:
+            progress=st.progress(0)
 
-            n_realizations = int(n_realizations_input)
-            mc_mask_fraction = float(mc_mask_fraction_input)
-            mc_n_regions = int(mc_n_regions_input)
+            rng=np.random.default_rng(1234)
 
-            pipeline_ratios = []
-            same_grid_ratios = []
+            for r in range(n_realizations):
 
-            # Fixed seed makes the complete experiment reproducible.
-            mc_rng = np.random.default_rng(12345)
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+                noise=rng.normal(
+                    0,
+                    sigma,
+                    N
+                )
 
-            for realization in range(n_realizations):
+                flux_mc=1+noise
 
-                deltaF_mc = mc_rng.normal(0, sigma, int(N))
-                velocity_mc = np.arange(int(N)) * dv
+                error_mc=sigma*np.ones(N)
 
-                lomb_original_mc = power_spectrum_lomb(velocity_mc, deltaF_mc, dv)
+                ps_original=lya_power_spectrum_lomb(
+                    wave_obs,
+                    flux_mc,
+                    error_mc,
+                    z_test,
+                    window_cMpc,
+                    segment_length
+                )
 
-                # Create exact, non-overlapping contiguous masked regions.
-                N_mc = len(deltaF_mc)
-                n_mask_total = int(round(mc_mask_fraction * N_mc))
-                n_regions = min(mc_n_regions, n_mask_total)
+                mask=np.ones(N,dtype=bool)
 
-                base_size = n_mask_total // n_regions
-                remainder = n_mask_total % n_regions
+                n_remove=int(0.2*N)
 
-                region_sizes = np.full(n_regions, base_size, dtype=int)
-                region_sizes[:remainder] += 1
+                start=rng.integers(
+                    0,
+                    N-n_remove
+                )
 
-                section_edges = np.linspace(0, N_mc, n_regions + 1, dtype=int)
-                mask_mc = np.zeros(N_mc, dtype=bool)
+                mask[start:start+n_remove]=False
 
-                for i in range(n_regions):
-                    section_start = section_edges[i]
-                    section_stop = section_edges[i + 1]
-                    gap_size = region_sizes[i]
+                ps_mask=lya_power_spectrum_lomb(
+                    wave_obs[mask],
+                    flux_mc[mask],
+                    error_mc[mask],
+                    z_test,
+                    window_cMpc,
+                    segment_length
+                )
 
-                    max_start = section_stop - gap_size
-                    start = mc_rng.integers(section_start, max_start + 1)
+                ratios.append(
+                    np.nanmean(ps_mask["pk_bin"])
+                    /
+                    np.nanmean(ps_original["pk_bin"])
+                )
 
-                    mask_mc[start:start + gap_size] = True
+                progress.progress((r+1)/n_realizations)
 
+            ratios=np.asarray(ratios)
 
-                velocity_masked_mc = velocity_mc[~mask_mc]
-                deltaF_masked_mc = deltaF_mc[~mask_mc]
+            st.write(f"Mean ratio = {np.mean(ratios):.4f}")
 
+            st.write(f"Std = {np.std(ratios,ddof=1):.4f}")
 
-                # Masked data through the unchanged pipeline.
-                lomb_pipeline_mc = power_spectrum_lomb(velocity_masked_mc, deltaF_masked_mc, dv)
+            fig=go.Figure()
 
-                # Diagnostic calculation using original unmasked k-grid.
-                k_same_grid_mc = lomb_original_mc["k"]
-                frequency_same_grid_mc = k_same_grid_mc / (2 * np.pi)
+            fig.add_trace(
+                go.Histogram(
+                    x=ratios,
+                    nbinsx=25
+                )
+            )
 
-                ls_same_grid_mc = LombScargle(
-                    velocity_masked_mc,
-                    deltaF_masked_mc,
-                    normalization="psd")
-
-                pk_same_grid_mc = (ls_same_grid_mc.power(frequency_same_grid_mc) * dv)
-
-                # Compare mean power-spectrum amplitudes.
-                original_mean_mc = np.mean(lomb_original_mc["pk"])
-                pipeline_mean_mc = np.mean(lomb_pipeline_mc["pk"])
-                same_grid_mean_mc = np.mean(pk_same_grid_mc)
-
-                pipeline_ratios.append(pipeline_mean_mc / original_mean_mc)
-                same_grid_ratios.append(same_grid_mean_mc / original_mean_mc)
-
-                progress_bar.progress((realization + 1) / n_realizations)
-                status_text.write(f"Completed {realization + 1} / {n_realizations} realizations")
-
-
-            pipeline_ratios = np.asarray(pipeline_ratios)
-            same_grid_ratios = np.asarray(same_grid_ratios)
-
-            pipeline_mean_ratio = np.mean(pipeline_ratios)
-            pipeline_std_ratio = np.std(pipeline_ratios, ddof=1)
-
-            same_grid_mean_ratio = np.mean(same_grid_ratios)
-            same_grid_std_ratio = np.std(same_grid_ratios, ddof=1)
-
-            pipeline_mae = np.mean(np.abs(pipeline_ratios - 1))
-            same_grid_mae = np.mean(np.abs(same_grid_ratios - 1))
-
-            pipeline_rmse = np.sqrt(np.mean((pipeline_ratios - 1)**2))
-            same_grid_rmse = np.sqrt(np.mean((same_grid_ratios - 1)**2))
-
-            pipeline_better_fraction = np.mean(
-                np.abs(pipeline_ratios - 1) < np.abs(same_grid_ratios - 1))
-
-            same_grid_better_fraction = np.mean(
-                np.abs(same_grid_ratios - 1) < np.abs(pipeline_ratios - 1))
-
-            paired_difference = same_grid_ratios - pipeline_ratios
-            mean_paired_difference = np.mean(paired_difference)
-            std_paired_difference = np.std(paired_difference, ddof=1)
-            
-            # Improvement in absolute amplitude recovery.
-            accuracy_improvement = (np.abs(pipeline_ratios - 1)- np.abs(same_grid_ratios - 1))
-
-            mean_accuracy_improvement = np.mean(accuracy_improvement)
-            std_accuracy_improvement = np.std(accuracy_improvement, ddof=1)
-
-            # Standard error of the mean improvement.
-            sem_accuracy_improvement = (std_accuracy_improvement / np.sqrt(n_realizations))
-
-            # Bootstrap 95% confidence interval for the mean improvement.
-            n_bootstrap = 10000
-            bootstrap_rng = np.random.default_rng(54321)
-
-            bootstrap_means = np.empty(n_bootstrap)
-
-            for i in range(n_bootstrap):
-                bootstrap_sample = bootstrap_rng.choice(accuracy_improvement,size=n_realizations,replace=True)
-                bootstrap_means[i] = np.mean(bootstrap_sample)
-
-            bootstrap_ci_low, bootstrap_ci_high = np.percentile(bootstrap_means,[2.5, 97.5])
-
-            # Store results so they remain visible after Streamlit reruns.
-            st.session_state["monte_carlo_masking_result"] = {
-                "n_realizations": n_realizations,
-                "mask_fraction": mc_mask_fraction,
-                "n_regions": mc_n_regions,
-                "pipeline_ratios": pipeline_ratios,
-                "same_grid_ratios": same_grid_ratios,
-                "pipeline_mean_ratio": pipeline_mean_ratio,
-                "pipeline_std_ratio": pipeline_std_ratio,
-                "same_grid_mean_ratio": same_grid_mean_ratio,
-                "same_grid_std_ratio": same_grid_std_ratio,
-                "pipeline_mae": pipeline_mae,
-                "same_grid_mae": same_grid_mae,
-                "pipeline_rmse": pipeline_rmse,
-                "same_grid_rmse": same_grid_rmse,
-                "pipeline_better_fraction": pipeline_better_fraction,
-                "same_grid_better_fraction": same_grid_better_fraction,
-                "mean_paired_difference": mean_paired_difference,
-                "std_paired_difference": std_paired_difference,
-                "accuracy_improvement": accuracy_improvement,
-                "mean_accuracy_improvement": mean_accuracy_improvement,
-                "std_accuracy_improvement": std_accuracy_improvement,
-                "sem_accuracy_improvement": sem_accuracy_improvement,
-                "bootstrap_ci_low": bootstrap_ci_low,
-                "bootstrap_ci_high": bootstrap_ci_high,}
-
-            status_text.success("Monte Carlo masking test completed.")
-
-
-        if "monte_carlo_masking_result" in st.session_state:
-            result = st.session_state["monte_carlo_masking_result"]
-            st.subheader("Monte Carlo Summary")
-            summary = pd.DataFrame({
-                "Method": ["Masked Lomb (Pipeline Grid)","Masked Lomb (Original k-grid)"],
-                "Mean Ratio": [result["pipeline_mean_ratio"],result["same_grid_mean_ratio"]],
-                "Std. Dev.": [result["pipeline_std_ratio"],result["same_grid_std_ratio"]],
-                "Mean |Ratio - 1|": [result["pipeline_mae"],result["same_grid_mae"]],
-                "RMSE from 1": [result["pipeline_rmse"],result["same_grid_rmse"]],
-                "Closer to Original (%)": [100 * result["pipeline_better_fraction"],100 * result["same_grid_better_fraction"]]})
-
-            st.dataframe(summary, hide_index=True, use_container_width=True)
-
-            st.write(f"Realizations = {result['n_realizations']}")
-            st.write(f"Masked fraction = {result['mask_fraction']:.4f}")
-            st.write(f"Contiguous masked regions = {result['n_regions']}")
-
-            st.subheader("Paired Comparison")
-            st.latex(r"\Delta R=R_{\rm same-grid}-R_{\rm pipeline}")
-            st.write(f"Mean paired difference = {result['mean_paired_difference']:.6f}")
-            st.write(f"Std. dev. of paired difference = {result['std_paired_difference']:.6f}")
-
-            # Plot 1: ratio for each realization.
-            realization_number = np.arange(1, result["n_realizations"] + 1)
-
-            fig_ratio = go.Figure()
-
-            fig_ratio.add_trace(go.Scatter(
-                x=realization_number,
-                y=result["pipeline_ratios"],
-                mode="markers",
-                name="Pipeline Grid"))
-
-            fig_ratio.add_trace(go.Scatter(
-                x=realization_number,
-                y=result["same_grid_ratios"],
-                mode="markers",
-                name="Original k-grid"))
-
-            fig_ratio.add_hline(y=1,
+            fig.add_vline(
+                x=1,
                 line_dash="dash",
-                line_color="black",
-                annotation_text="Ideal Ratio = 1")
+                annotation_text="Ideal"
+            )
 
-            fig_ratio.update_layout(
-                title="Masked / Original Power Ratio for Each Realization",
-                xaxis_title="White-Noise Realization",
-                yaxis_title="Masked / Original Mean P(k)")
+            fig.update_layout(
+                title="Monte Carlo Masking Test",
+                xaxis_title="Masked / Original Mean Power",
+                yaxis_title="Count"
+            )
 
-            st.plotly_chart(fig_ratio, use_container_width=True)
-
-
-            # Plot 2: ratio distributions.
-            fig_hist = go.Figure()
-
-            fig_hist.add_trace(go.Histogram(
-                x=result["pipeline_ratios"],
-                name="Pipeline Grid",
-                opacity=0.65,
-                nbinsx=30))
-
-            fig_hist.add_trace(go.Histogram(
-                x=result["same_grid_ratios"],
-                name="Original k-grid",
-                opacity=0.65,
-                nbinsx=30))
-
-            fig_hist.add_vline(x=1,
-                line_dash="dash",
-                line_color="black",
-                annotation_text="Ideal Ratio = 1")
-
-            fig_hist.update_layout(
-                title="Distribution of Masked / Original Power Ratios",
-                xaxis_title="Masked / Original Mean P(k)",
-                yaxis_title="Number of Realizations",
-                barmode="overlay")
-
-            st.plotly_chart(fig_hist, use_container_width=True)
-
-
-            # Plot 3: direct paired comparison.
-            fig_paired = go.Figure()
-
-            fig_paired.add_trace(go.Scatter(
-                x=result["pipeline_ratios"],
-                y=result["same_grid_ratios"],
-                mode="markers",
-                name="Realizations"))
-
-            all_ratios = np.concatenate([result["pipeline_ratios"],result["same_grid_ratios"]])
-
-            ratio_min = np.min(all_ratios)
-            ratio_max = np.max(all_ratios)
-
-            fig_paired.add_trace(go.Scatter(
-                x=[ratio_min, ratio_max],
-                y=[ratio_min, ratio_max],
-                mode="lines",
-                name="Equal Ratios",
-                line=dict(dash="dash")))
-
-            fig_paired.update_layout(
-                title="Paired Comparison of Pipeline and Original k-grid Ratios",
-                xaxis_title="Pipeline-Grid Ratio",
-                yaxis_title="Original-k-grid Ratio")
-
-            st.plotly_chart(fig_paired, use_container_width=True)
-
-            st.info("""Interpretation:
-            • Mean Ratio close to 1 indicates little systematic bias.
-            • Smaller Std. Dev. indicates greater realization-to-realization scatter.
-            • Smaller Mean |Ratio − 1| and RMSE indicate better recovery of the
-              original power-spectrum amplitude.
-            • Closer to Original (%) shows how often each method gives the smaller
-              amplitude error for the same white-noise realization and mask.
-            • The Monte Carlo results should be used to decide whether changing
-              the Lomb–Scargle k-grid construction is justified.""")
-
-            st.subheader("Amplitude-Recovery Comparison")
-
-            st.latex(r"D_i= |R_{\rm pipeline,i}-1| - |R_{\rm same-grid,i}-1|")
-
-            st.write(f"Mean improvement = {result['mean_accuracy_improvement']:.6f}")
-
-            st.write(f"Std. dev. of improvement = {result['std_accuracy_improvement']:.6f}")
-
-            st.write(f"Standard error = {result['sem_accuracy_improvement']:.6f}")
-
-            st.write(f"Bootstrap 95% confidence interval = [{result['bootstrap_ci_low']:.6f}, {result['bootstrap_ci_high']:.6f}]")
-
-            if result["bootstrap_ci_low"] > 0:
-                st.success(
-                    "The original k-grid gives significantly better "
-                    "amplitude recovery in this experiment.")
-
-            elif result["bootstrap_ci_high"] < 0:
-                st.warning("The pipeline grid gives significantly better amplitude recovery in this experiment.")
-
-            else:
-                st.info("The confidence interval includes zero, so this experiment does not show a statistically clear "
-                    "difference in amplitude recovery.")
+            st.plotly_chart(fig,width='stretch')
