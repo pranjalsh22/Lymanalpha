@@ -482,8 +482,12 @@ def average_segment_power_spectra(segment_ps):
     # Standard deviation: only where at least two segments contribute
     good_std = valid_counts > 1
     if np.any(good_std):
-        std_pk[good_std] = np.nanstd(pk[:, good_std],axis=0,ddof=1)
-
+        std_pk[good_std] = (
+            np.nanstd(
+                pk[:, good_std],
+                axis=0,
+                ddof=1
+            )/ np.sqrt(valid_counts[good_std]))
     # Total contributing modes
     total_modes = np.sum([ps["n_modes"] for ps in segment_ps],axis=0)
     
@@ -682,7 +686,7 @@ showfft=st.checkbox("Show FFT")
 
 
 st.header("Individual Spectra")
-
+'''
 #-----section 4.2: Loop Through Spectra
 for spec in spectra:
     
@@ -1077,7 +1081,7 @@ for spec in spectra:
                     yaxis_title="log₁₀(kP(k)/π)")
 
                 st.plotly_chart(fig,width='stretch',config=plotly_download_config(spec["object"],"LargeScalePowerStability"))
-
+'''
 
 '''
         #-----section 4.2.7:Signal-to-Noise Plot
