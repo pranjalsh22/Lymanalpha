@@ -736,11 +736,7 @@ for spec in spectra:
             st.dataframe(pd.DataFrame({
                 "log10(k)": np.log10(ps_lomb["k_bin"]),
                 "Modes": ps_lomb["n_modes"]}))
-            
-        #-----section 4.2.4: Lyα Power Spectrum Plot
-'''        if ps_lomb is not None :
-
-            # ----- Step 1: Observed Spectrum -----
+'''          
             with st.expander("1. Observed Spectrum", expanded=False):
 
                 fig_obs = go.Figure()
@@ -761,7 +757,6 @@ for spec in spectra:
                 st.plotly_chart(fig_obs,width="stretch",config=plotly_download_config(spec["object"],"Step_1_Observed_Spectrum"))
 
 
-            # ----- Step 2: Lyα Forest + Rolling Mean -----
             with st.expander("2. Lyα Forest and Rolling Mean", expanded=False):
 
                 wave_lya = ps_lomb["wave_obs"]
@@ -801,11 +796,7 @@ for spec in spectra:
                         spec["object"],
                         "Step_2_Lya_Forest_Rolling_Mean"))
 
-
-            # ============================================================
-            # STEP 3 : FLUX CONTRAST
-            # ============================================================
-
+        
             with st.expander("3. Flux Contrast", expanded=False):
 
                 wave_lya = ps_lomb["wave_obs"]
@@ -837,12 +828,7 @@ for spec in spectra:
                     hovermode="x unified")
 
                 st.plotly_chart(fig_deltaF,width="stretch",config=plotly_download_config(spec["object"],"Step_3_Flux_Contrast"))
-
-
-            # ============================================================
-            # STEP 4 : LOMB-SCARGLE POWER SPECTRUM
-            # ============================================================
-
+'''
             with st.expander("4. Noise Corrected Lomb–Scargle Power Spectrum", expanded=False):
 
                 segment_ps = ps_lomb["segment_ps"]
@@ -911,7 +897,7 @@ for spec in spectra:
                     config=plotly_download_config(
                         spec["object"],
                         "Step_4_Lomb_Scargle_Power_Spectrum"))
-'''
+
             with st.expander("5. Noise Power Spectrum", expanded=False):
 
                 k_noise = ps_lomb["k"]
@@ -953,7 +939,6 @@ for spec in spectra:
                         "Step_5_Noise_Power_Spectrum"
                     )
                 )
-
 
             with st.expander("6. Final Noise-Corrected Power Spectrum", expanded=False):
 
@@ -1009,16 +994,6 @@ for spec in spectra:
                     hovermode="x unified")
 
                 st.plotly_chart(fig_final,width="stretch",config=plotly_download_config(spec["object"],"Step_6_Final_Power_Spectrum"))
-
-
-
-
-
-
-
-'''
-#-----section 4.2.4: Rolling Mean Normalization
-        if ps_lomb is not None:
 
             with st.expander("1. Rolling Mean Normalization",expanded=True):
 
@@ -1080,12 +1055,6 @@ for spec in spectra:
                     width="stretch",
                     config=plotly_download_config(spec["object"],"FluxContrast"))
 
-
-
- 
-
-
-            #B) Binned Power Spectra
             with st.expander("B) Binned Power Spectra", expanded=True):
                 if showfft==True: 
                     # FFT
@@ -1171,8 +1140,6 @@ for spec in spectra:
 
                 st.plotly_chart(fig_lomb_bin,width='stretch',config=plotly_download_config(spec["object"],"LombScargle_binned_PowerSpectrum"))
 
-                
-            
 
             # D) Large-scale Power Stability Test
             with st.expander("D) Large-scale Power Stability Test"):
@@ -1204,7 +1171,7 @@ for spec in spectra:
                 st.plotly_chart(fig,width='stretch',config=plotly_download_config(spec["object"],"LargeScalePowerStability"))
 
 
-
+'''
         #-----section 4.2.7:Signal-to-Noise Plot
         with st.expander("Signal to Noise Ratio",expanded=False):
             smask = np.isfinite(snr)
