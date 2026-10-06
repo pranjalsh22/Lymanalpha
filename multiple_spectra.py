@@ -1096,7 +1096,7 @@ for spec in spectra:
 
 
 
-       
+     '''  
 
 
             #B) Binned Power Spectra
@@ -1218,7 +1218,7 @@ for spec in spectra:
                 st.plotly_chart(fig,width='stretch',config=plotly_download_config(spec["object"],"LargeScalePowerStability"))
 
 
-
+'''
         #-----section 4.2.7:Signal-to-Noise Plot
         with st.expander("Signal to Noise Ratio",expanded=False):
             smask = np.isfinite(snr)
