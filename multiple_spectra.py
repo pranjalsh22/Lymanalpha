@@ -682,7 +682,7 @@ showfft=st.checkbox("Show FFT")
 
 
 st.header("Individual Spectra")
-'''
+
 #-----section 4.2: Loop Through Spectra
 for spec in spectra:
     
@@ -1237,4 +1237,4 @@ for spec in spectra:
         with st.expander("FITS Header"):
             st.json(dict(spec["header"]))
 
-'''
+
