@@ -1028,7 +1028,7 @@ for spec in spectra:
 
 
 
-
+'''
 
 
 #-----section 4.2.4: Rolling Mean Normalization
@@ -1096,7 +1096,7 @@ for spec in spectra:
 
 
 
-'''  
+ 
 
 
             #B) Binned Power Spectra
