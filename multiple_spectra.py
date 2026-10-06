@@ -1096,7 +1096,7 @@ for spec in spectra:
 
 
 
-     '''  
+'''  
 
 
             #B) Binned Power Spectra
