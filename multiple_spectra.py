@@ -739,7 +739,7 @@ for spec in spectra:
             
         #-----section 4.2.4: Lyα Power Spectrum Plot
         if ps_lomb is not None :
-
+'''
             # ----- Step 1: Observed Spectrum -----
             with st.expander("1. Observed Spectrum", expanded=False):
 
@@ -1016,7 +1016,7 @@ for spec in spectra:
 
 
 
-
+'''
 #-----section 4.2.4: Rolling Mean Normalization
         if ps_lomb is not None:
 
