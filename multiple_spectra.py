@@ -911,7 +911,7 @@ for spec in spectra:
                     config=plotly_download_config(
                         spec["object"],
                         "Step_4_Lomb_Scargle_Power_Spectrum"))
-
+'''
             with st.expander("5. Noise Power Spectrum", expanded=False):
 
                 k_noise = ps_lomb["k"]
@@ -983,8 +983,8 @@ for spec in spectra:
                 )
 
                 log_err = (
-                    pk_err[valid_err]
-                    / pk_final[valid_err]
+                    (pk_err[valid_err]
+                    / pk_final[valid_err])
                     / np.log(10)
                 )
 
@@ -998,37 +998,23 @@ for spec in spectra:
                     error_y=dict(
                         type="data",
                         array=log_err,
-                        visible=True
-                    ),
+                        visible=True),
                     line=dict(width=3),
-                    marker=dict(size=6)
-                ))
+                    marker=dict(size=6)))
 
                 fig_final.update_layout(
                     title="Final Noise-Corrected Lomb–Scargle Power Spectrum",
                     xaxis_title=r"$\log_{10}(k/\mathrm{km}^{-1}\,\mathrm{s})$",
                     yaxis_title=r"$\log_{10}[kP(k)/\pi]$",
-                    hovermode="x unified"
-                )
+                    hovermode="x unified")
 
-                st.plotly_chart(
-                    fig_final,
-                    width="stretch",
-                    config=plotly_download_config(
-                        spec["object"],
-                        "Step_6_Final_Power_Spectrum"
-                    )
-                )
+                st.plotly_chart(fig_final,width="stretch",config=plotly_download_config(spec["object"],"Step_6_Final_Power_Spectrum"))
 
 
 
 
 
 
-
-
-
-'''
 
 
 #-----section 4.2.4: Rolling Mean Normalization
