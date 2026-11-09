@@ -562,6 +562,47 @@ def group_segments_by_redshift(all_segments, redshift_bins):
 def plotly_download_config(quasar_name,graph_name):
     return {"toImageButtonOptions": {"format": "png","filename":f"{quasar_name}_{graph_name}","height": 800,"width": 1200,"scale": 2}}
 
+# SECTION 2.7 : THE PLOTS STUFF 
+
+def bin_power_for_debug(k, pk):
+    """
+    Bin power in linear units while retaining negative noise-subtracted values.
+    This is for diagnostics; the existing science binning function is unchanged.
+    """
+    k = np.asarray(k, dtype=float)
+    pk = np.asarray(pk, dtype=float)
+    n_bins = len(K_BIN_EDGES) - 1
+
+    k_bin = 10 ** (0.5 * (K_BIN_EDGES[:-1] + K_BIN_EDGES[1:]))
+    pk_bin = np.full(n_bins, np.nan)
+    pk_err = np.full(n_bins, np.nan)
+    n_modes = np.zeros(n_bins, dtype=int)
+
+    valid_k = np.isfinite(k) & (k > 0)
+    logk = np.full(k.shape, np.nan)
+    logk[valid_k] = np.log10(k[valid_k])
+
+    for i in range(n_bins):
+        m = (
+            valid_k
+            & np.isfinite(pk)
+            & (logk >= K_BIN_EDGES[i])
+            & (logk < K_BIN_EDGES[i + 1])
+        )
+        values = pk[m]
+        n_modes[i] = values.size
+
+        if values.size == 0:
+            continue
+
+        pk_bin[i] = np.mean(values)
+        if values.size > 1:
+            pk_err[i] = np.std(values, ddof=1) / np.sqrt(values.size)
+
+    return k_bin, pk_bin, pk_err, n_modes
+
+
+
 # SECTION 3 : ANALYSIS PIPELINE
 
 # SECTION 3.1 : USER INPUTS IN SIDEBAR
