@@ -375,11 +375,20 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
 
         #noise_ps_seg = estimate_noise_periodogram(velocity_seg,error_seg,smooth_seg,dv_forest,L_velocity)
         noise_ps_seg = estimate_noise_high_k(raw_ps_seg)
+        pk_corrected = raw_ps_seg["pk"] - noise_ps_seg["pk"]
 
+        # Binned diagnostic stages. Keep signed values after noise subtraction.
+        k_debug, pk_raw_bin, pk_raw_err, n_raw_modes = bin_power_for_debug(
+            raw_ps_seg["k"], raw_ps_seg["pk"])
+        _, pk_noise_bin, _, n_noise_modes = bin_power_for_debug(
+            raw_ps_seg["k"], noise_ps_seg["pk"])
+        _, pk_sub_bin, pk_sub_err, n_sub_modes = bin_power_for_debug(
+            raw_ps_seg["k"], pk_corrected)
 
-        
-        pk_corrected = (raw_ps_seg["pk"]- noise_ps_seg["pk"])
-        k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(raw_ps_seg["k"],pk_corrected)
+        # Science spectrum retains the existing positive-power binning.
+        k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(
+            raw_ps_seg["k"], pk_corrected)
+
         wave_center = np.mean(wave_obs_forest[indices])
         segment_z = wave_center / 1215.67 - 1.0
         segment_ps.append({
@@ -387,7 +396,21 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
             "k_bin": k_bin,
             "pk_bin": pk_bin,
             "pk_err": pk_err,
-            "n_modes": n_modes})
+            "n_modes": n_modes,
+            # Diagnostic arrays, all binned on the same science k bins:
+            "k_debug_bin": k_debug,
+            "pk_raw_bin": pk_raw_bin,
+            "pk_raw_err_bin": pk_raw_err,
+            "pk_noise_bin": pk_noise_bin,
+            "pk_sub_bin": pk_sub_bin,
+            "pk_sub_err_bin": pk_sub_err,
+            "n_raw_modes": n_raw_modes,
+            "n_noise_modes": n_noise_modes,
+            "n_sub_modes": n_sub_modes,
+            "P_noise": noise_ps_seg["P_noise"],
+            "n_high_k": noise_ps_seg["n_high_k"],
+            "logk_noise_min": noise_ps_seg["logk_noise_min"],
+        })
 
     average_ps = average_segment_power_spectra(segment_ps)
 
