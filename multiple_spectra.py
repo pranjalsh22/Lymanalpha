@@ -304,29 +304,28 @@ def power_spectrum_lomb_raw(velocity, deltaF, dv, L_velocity):
      #   "pk": np.mean(noise_pk, axis=0)}
 
 def estimate_noise_high_k(raw_ps, logk_noise_min=-0.2):
-
     k = raw_ps["k"]
     pk = raw_ps["pk"]
 
-    valid = (np.isfinite(k) & np.isfinite(pk) & (k > 0))
-
+    valid = np.isfinite(k) & np.isfinite(pk) & (k > 0)
     high_k = valid & (np.log10(k) >= logk_noise_min)
 
     if np.sum(high_k) < 2:
-        return {
-            "k": k,
-            "pk": np.full_like(pk, np.nan, dtype=float)}
+        P_noise = np.nan
+    else:
+        # Current approximation: constant noise floor from the mean high-k power.
+        P_noise = float(np.mean(pk[high_k]))
 
-    # Fit a constant noise level using the mean high-k power
-    P_noise = np.mean(pk[high_k])
-
-    # Assume white noise: same noise power at every k
     noise_pk = np.full_like(pk, P_noise, dtype=float)
 
     return {
         "k": k,
         "pk": noise_pk,
-        "P_noise": P_noise}
+        "P_noise": P_noise,
+        "high_k_mask": high_k,
+        "n_high_k": int(np.sum(high_k)),
+        "logk_noise_min": float(logk_noise_min),
+    }
 
 # ----- Step 5 : Assemble the complete Lyα Lomb–Scargle pipeline
 def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_length):
