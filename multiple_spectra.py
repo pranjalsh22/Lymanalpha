@@ -402,8 +402,16 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
     noise_ps= estimate_noise_high_k(raw_ps)
     pk_corrected = raw_ps["pk"] - noise_ps["pk"]
 
-    # Optional: useful for diagnostic plots
-    k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(raw_ps["k"],pk_corrected)
+    # Binned full-forest diagnostic stages (not used as the science result).
+    k_debug, pk_raw_bin, pk_raw_err_bin, n_raw_modes = bin_power_for_debug(
+        raw_ps["k"], raw_ps["pk"])
+    _, pk_noise_bin, _, n_noise_modes = bin_power_for_debug(
+        raw_ps["k"], noise_ps["pk"])
+    _, pk_sub_bin, pk_sub_err_bin, n_sub_modes = bin_power_for_debug(
+        raw_ps["k"], pk_corrected)
+
+    k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(
+        raw_ps["k"], pk_corrected)
 
     return {
         "wave_obs": wave_obs_forest,
@@ -423,6 +431,18 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
         "pk": raw_ps["pk"],
         "noise_pk": noise_ps["pk"],
         "pk_corrected": pk_corrected,
+        "P_noise": noise_ps["P_noise"],
+        "n_high_k": noise_ps["n_high_k"],
+        "logk_noise_min": noise_ps["logk_noise_min"],
+        "k_debug_bin": k_debug,
+        "pk_raw_bin": pk_raw_bin,
+        "pk_raw_err_bin": pk_raw_err_bin,
+        "pk_noise_bin": pk_noise_bin,
+        "pk_sub_bin": pk_sub_bin,
+        "pk_sub_err_bin": pk_sub_err_bin,
+        "n_raw_modes": n_raw_modes,
+        "n_noise_modes": n_noise_modes,
+        "n_sub_modes": n_sub_modes,
 
         # Individual corrected segment spectra
         "segment_ps": segment_ps,
@@ -432,6 +452,7 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
         "pk_bin": average_ps["pk_bin"],
         "pk_err": average_ps["pk_err"],
     }
+
 
 # SECTION 2.5 : COMOVING-SPACE UTILITIES
 
