@@ -12,7 +12,7 @@ from scipy.interpolate import interp1d
 import pickle
 
 
-st.caption('version 14')
+st.caption('version 13')
 st.set_page_config(page_title=".fit file plots",layout="wide")
 
 SPEC_DIR = "spec" #name of the folder
