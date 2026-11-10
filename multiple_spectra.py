@@ -1,22 +1,57 @@
+"""Combined Ly-alpha forest power-spectrum analysis for multiple quasars.
 
-#----section 1: imports config and dataset folder-------------
+This script combines the useful parts of multiple_spectra-3.py and
+multiple_spectra-2(2).py and fixes the positive-only binning problem.
+
+Important behaviour:
+- The combined result is built from Lomb-Scargle spectra of fixed comoving
+  segments from every successfully loaded quasar.
+- Noise-subtracted power is binned in LINEAR units without rejecting negative
+  values. Negative bins are retained in the returned arrays, tables, and CSV.
+- Signed power is plotted against log10(k) on a LINEAR y-axis. Conventional
+  log10[kP(k)/pi] plots show only positive binned values, because log10 of a
+  zero or negative number is undefined.
+- The high-k constant noise-floor estimate is retained from the original
+  scripts. It is an approximation and must be validated for the dataset.
+
+Run with:
+    streamlit run multiple_spectra_combined_signed.py
+
+Expected input files in ./spec:
+    <quasar_key>_flux.fits
+    <quasar_key>_error.fits
+
+The file prefix before _flux.fits / _error.fits must match a key in REDSHIFTS.
+"""
+
+from __future__ import annotations
+
 import os
+import pickle
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pandas as pd
-import streamlit as st
-from astropy.io import fits
 import plotly.graph_objects as go
-from astropy.timeseries import LombScargle
+import streamlit as st
 from astropy.cosmology import FlatLambdaCDM
-from scipy.interpolate import interp1d
-import pickle
+from astropy.io import fits
+from astropy.timeseries import LombScargle
 
 
-st.caption('version 13')
-st.set_page_config(page_title=".fit file plots",layout="wide")
+# -----------------------------------------------------------------------------
+# SECTION 1: APP CONFIGURATION AND DATASET
+# -----------------------------------------------------------------------------
 
-SPEC_DIR = "spec" #name of the folder
-redshifts = {
+st.set_page_config(page_title="Combined Lyα Forest Power Spectrum", layout="wide")
+st.caption("Combined multi-quasar Lomb–Scargle analysis | signed noise-subtracted power retained")
+
+SPEC_DIR = Path("spec")
+LYA_REST_WAVELENGTH = 1215.67  # Angstrom
+C_KMS = 299792.458
+
+REDSHIFTS = {
     "J0306+1853_HIRES": 5.36,
     "J0957+0610_UVES": 5.17,
     "J0131-0321_HIRES": 5.12,
@@ -31,1446 +66,1281 @@ redshifts = {
     "J1008-0212_UVES": 5.04,
     "J0025-0145_HIRES": 5.07,
     "J0747+1153_HIRES": 5.26,
-    "J0915+4924_HIRES": 5.20,}
+    "J0915+4924_HIRES": 5.20,
+}
 
-cosmo = FlatLambdaCDM(H0=67.8,Om0=0.308,Ob0=0.0482) # Sherwood / Sherwood-Relics cosmology
+COSMO = FlatLambdaCDM(H0=67.8, Om0=0.308, Ob0=0.0482)
 
-# SECTION 2 : USER-DEFINED FUNCTIONS
-
-# SECTION 2.1 : GENERAL DATA HANDLING
-
-# 2.1.1 Load FITS spectrum
-def load_fits(source):
-    with fits.open(source) as hdul: #HDU is Header data unit list. in this case there's only one HDU 
-        for hdu in hdul:
-            if hdu.data is not None:
-                arr = np.array(hdu.data,dtype=np.float64) 
-                return (np.squeeze(arr),hdu.header)
-    raise ValueError(f"No spectrum found in {source}")
-
-# 2.1.2 Create wavelength array
-def wavelength_array(header, n):
-    return 10 ** (header["CRVAL1"]+ np.arange(n) * header["CDELT1"])
-
-# 2.1.3 Compute velocity spacing
-def velocity_spacing(header):
-    return (299792.458* np.log(10)* header["CDELT1"])
-
-# 2.1.4 Assign S/N quality label
-def quality_label(snr):
-    if snr > 20:
-        return "Excellent(>20)"
-    elif snr > 10:
-        return "Good(>10)"
-    elif snr > 5:
-        return "Moderate(>5)"
-    else:
-        return "Poor(<5)"
-    
-# 2.1.5 pair flux and error spectra
-def find_pairs(folder):
-    pairs = {}
-    if not os.path.isdir(folder):
-        return {}
-    for fname in os.listdir(folder):
-        if not fname.endswith(".fits"):
-            continue
-        full = os.path.join(folder,fname)
-        if "_flux" in fname:
-            key = fname.replace("_flux.fits","")
-            pairs.setdefault(key,{})
-            pairs[key]["flux"] = full
-        elif "_error" in fname:
-            key = fname.replace("_error.fits","")
-            pairs.setdefault(key,{})
-            pairs[key]["error"] = full
-    return {k: v for k, v in pairs.items() if ("flux" in v and "error" in v)}
-
-# 2.1.6 Compute signal-to-noise statistics
-def snr_calculations(n,header,flux,error):
-    snr = np.full(n,np.nan) 
-    good = (np.isfinite(flux) & np.isfinite(error) & (error > 0))
-    snr[good] = (flux[good]/error[good])
-    median_snr = float(np.nanmedian(snr))
-    masked_fraction = (np.sum(~np.isfinite(flux))/len(flux) * 100)
-    return snr,median_snr,masked_fraction
-
-# SECTION 2.2 : COMMON Lyα FOREST PREPROCESSING: Preprocessing steps shared by both the FFT and Lomb–Scargle estimators.
-
-# 2.2.1 Extract the Lyα forest
-def extract_lya_forest(wave_obs,flux,error,z,rest_min=1040,rest_max=1180):
-    wave_rest = wave_obs / (1 + z)
-
-    good = (np.isfinite(flux)
-        & np.isfinite(error)
-        & (error > 0))
-
-    forest = ((wave_rest >= rest_min) & (wave_rest <= rest_max))
-
-    mask = forest & good
-
-    return {
-        "wave_obs": wave_obs[mask],
-        "wave_rest": wave_rest[mask],
-        "flux": flux[mask],
-        "error": error[mask]
-    }
-
-# 2.2.2 Compute flux contrast (global mean normalization)
-def flux_contrast(flux_forest):
-    Fmean = np.nanmean(flux_forest)
-    if not np.isfinite(Fmean):
-        return None, None
-    if Fmean == 0:
-        return None, None
-    deltaF = (flux_forest- Fmean) / Fmean
-    return (Fmean,deltaF)
-
-# 2.2.3 Construct the velocity coordinate
-def velocity_grid(wave_rest):
-    c = 299792.458
-    velocity = (c* np.log(wave_rest))
-    dv = np.median(np.diff(velocity))
-    return (velocity,dv)
-
-# 2.2.4 Bin the power spectrum onto logarithmic k bins
-def bin_power_spectrum(k, pk):
-    valid = (np.isfinite(k) & np.isfinite(pk) & (k > 0) & (pk > 0))
-    k = k[valid]
-    pk = pk[valid]
-    logk = np.log10(k)
-    k_bin = []
-    pk_bin = []
-    pk_err = []
-    n_modes = []
-
-    for i in range(len(K_BIN_EDGES)-1):
-        logk_center = 0.5 * (K_BIN_EDGES[i] + K_BIN_EDGES[i+1])
-        k_center = 10**logk_center
-        m = ((logk >= K_BIN_EDGES[i]) &
-             (logk <  K_BIN_EDGES[i+1]))
-
-        if np.sum(m) == 0:
-            k_bin.append(k_center)
-            pk_bin.append(np.nan)
-            pk_err.append(np.nan)
-            n_modes.append(0)
-            continue
-
-        k_bin.append(k_center)
-        pk_bin.append(np.mean(pk[m]))
-
-        if np.sum(m) > 1:
-            N = np.sum(m)
-            std = np.std(pk[m], ddof=1)
-            pk_err.append(std/np.sqrt(N))
-        else:
-            pk_err.append(0.0)
-
-        n_modes.append(np.sum(m))
-        
-    return (
-        np.asarray(k_bin),
-        np.asarray(pk_bin),
-        np.asarray(pk_err),
-        np.asarray(n_modes))
-
-# SECTION 2.3 : FFT POWER SPECTRUM ESTIMATOR
-
-# ----- Step 1 : Compute the Fast Fourier Transform (FFT)
-def compute_fft(deltaF):
-    N = len(deltaF)
-    fft_vals = np.fft.rfft(deltaF)
-    return (fft_vals,N)
-
-# ----- Step 2 : Construct the Fourier k array
-def compute_k(N,dv):
-    k = (2* np.pi* np.fft.rfftfreq(N,d=dv))
-    return k
-def compute_k_ls(L_velocity, dv):
-    """L_velocity : velocity length of the full section (km/s)
-    dv : pixel spacing (km/s)
-    """
-
-    k_min = 2 * np.pi / L_velocity
-    k_nyquist = np.pi / dv
-
-    n_max = int(np.floor(k_nyquist / k_min))
-
-    n = np.arange(1, n_max + 1)
-
-    k = n * k_min
-
-    return k
-# ----- Step 3 : Compute the FFT power spectrum
-def compute_power_spectrum(fft_vals,N,dv):
-    Pk = (dv / N) * np.abs(fft_vals)**2
-    return Pk
-
-# ----- Step 4 : Assemble the generic FFT power-spectrum estimator
-def power_spectrum_fft(deltaF, dv):
-    fft_vals, N = compute_fft(deltaF)
-    k = compute_k(N, dv)
-    pk = compute_power_spectrum(fft_vals, N, dv)
-    k_bin, pk_bin, pk_err,n_modes = bin_power_spectrum(k,pk)
-    return {
-        "fft": fft_vals,
-        "k": k,
-        "pk": pk,
-        "k_bin": k_bin,
-        "pk_bin": pk_bin,
-        "pk_err": pk_err,
-        "n_modes": n_modes}
-
-# ----- Step 5 : Assemble the complete Lyα FFT pipeline
-def lya_power_spectrum_fft(wave_obs,flux,error,z):
-    forest = extract_lya_forest(wave_obs,flux,error,z)
-    wave_rest = forest["wave_rest"]
-    flux_forest = forest["flux"]
-    
-    if len(flux_forest) < 10:
-        return None
-
-    Fmean, deltaF = (flux_contrast(flux_forest))
-
-    if deltaF is None:
-        return None
-    velocity, dv_forest = (velocity_grid(wave_rest))
-    ps = power_spectrum_fft(deltaF, dv_forest)
-    return {
-        "wave_rest": wave_rest,
-        "flux_forest": flux_forest,
-        "Fmean": Fmean,
-        "deltaF": deltaF,
-        "velocity": velocity,
-        "dv_forest": dv_forest,
-        **ps}
-
-# SECTION 2.4 : LOMB–SCARGLE POWER SPECTRUM ESTIMATOR
-
-# ----- Step 1 : Compute the rolling-mean continuum
-def rolling_mean_flux(flux, chi, window_cMpc):
-    half_window = window_cMpc / 2.0
-    smooth = np.full_like(flux, np.nan, dtype=float)
-    for i in range(len(flux)):
-        left = np.searchsorted(chi, chi[i] - half_window)
-        right = np.searchsorted(chi,chi[i] + half_window,side="right")
-        values = flux[left:right]
-        good = np.isfinite(values)
-        if np.any(good):
-            smooth[i] = np.mean(values[good])
-    return smooth
-
-# ----- Step 2 : Compute rolling-mean flux contrast (δF)
-def flux_contrast_rolling(flux_forest,chi_forest,window_cMpc):
-    smooth = rolling_mean_flux(flux_forest,chi_forest,window_cMpc)
-    deltaF = (flux_forest / smooth) - 1
-    return smooth, deltaF
-
-# ----- Step 3 : Compute the raw Lomb–Scargle periodogram
-
-def power_spectrum_lomb_raw(velocity, deltaF, dv, L_velocity):
-
-    k = compute_k_ls(L_velocity, dv)
-
-    frequency = k / (2 * np.pi)
-
-    ls = LombScargle(velocity,deltaF,normalization="psd")
-
-    pk = ls.power(frequency)
-
-    pk *= dv
-
-    return {"k": k,"pk": pk}
-# ----- Step 4 : Estimate the noise power spectrum using Monte Carlo realizations
-
-
-#noise_realisations=st.sidebar.number_input("n realisatios for noise",value=1)
-
-#def estimate_noise_periodogram(velocity,error,smooth,dv,L_velocity,n_realizations=noise_realisations):
- #   noise_pk = []
-  #  good = (np.isfinite(error) & np.isfinite(smooth) & (smooth != 0))
-   # velocity = velocity[good]
-    #sigma = error[good] / smooth[good]
-
-    #for _ in range(n_realizations):
-     #   deltaF_noise = np.random.normal(loc=0.0,scale=sigma)
-      #  ps = power_spectrum_lomb_raw(velocity,deltaF_noise,dv,L_velocity)
-       # noise_pk.append(ps["pk"])
-
-  #  noise_pk = np.asarray(noise_pk)
-   # return {
-    #    "k": ps["k"],
-     #   "pk": np.mean(noise_pk, axis=0)}
-
-def estimate_noise_high_k(raw_ps, logk_noise_min=-0.2):
-    k = raw_ps["k"]
-    pk = raw_ps["pk"]
-
-    valid = np.isfinite(k) & np.isfinite(pk) & (k > 0)
-    high_k = valid & (np.log10(k) >= logk_noise_min)
-
-    if np.sum(high_k) < 2:
-        P_noise = np.nan
-    else:
-        # Current approximation: constant noise floor from the mean high-k power.
-        P_noise = float(np.mean(pk[high_k]))
-
-    noise_pk = np.full_like(pk, P_noise, dtype=float)
-
-    return {
-        "k": k,
-        "pk": noise_pk,
-        "P_noise": P_noise,
-        "high_k_mask": high_k,
-        "n_high_k": int(np.sum(high_k)),
-        "logk_noise_min": float(logk_noise_min),
-    }
-
-# ----- Step 5 : Assemble the complete Lyα Lomb–Scargle pipeline
-def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_length):
-    forest = extract_lya_forest(wave_obs,flux,error,z)
-    wave_obs_forest = forest["wave_obs"]
-    wave_rest = forest["wave_rest"]
-    flux_forest = forest["flux"]
-    error_forest = forest["error"]
-
-    if len(flux_forest) < 10:
-        return None
-
-    chi_forest = comoving_coordinate(wave_obs_forest)
-
-    
-    velocity, dv_forest = velocity_grid(wave_rest)
-    smooth, deltaF = flux_contrast_rolling(flux_forest,chi_forest, window_cMpc)
-
-    good = (np.isfinite(flux_forest)
-        & np.isfinite(error_forest)
-        & (error_forest > 0)
-        & np.isfinite(smooth)
-        & (smooth != 0))
-
-    if np.sum(good) < 10:
-        return None
-
-    segments = split_into_segments(chi_forest,segment_length=segment_length)
-    segment_ps = []
-    L_velocity_full = velocity[-1] - velocity[0] + dv_forest
-    for indices in segments:
-        
-        velocity_section = velocity[indices]
-        L_velocity = velocity_section[-1] - velocity_section[0] + dv_forest
-        
-        segment_good = good[indices]
-        
-        if np.sum(segment_good) < 10:
-            continue
-
-        velocity_seg = velocity[indices][segment_good]
-        deltaF_seg = deltaF[indices][segment_good]
-        error_seg = error_forest[indices][segment_good]
-        smooth_seg = smooth[indices][segment_good]
-        raw_ps_seg = power_spectrum_lomb_raw(velocity_seg,deltaF_seg,dv_forest,L_velocity)
-
-        #noise_ps_seg = estimate_noise_periodogram(velocity_seg,error_seg,smooth_seg,dv_forest,L_velocity)
-        noise_ps_seg = estimate_noise_high_k(raw_ps_seg)
-        pk_corrected = raw_ps_seg["pk"] - noise_ps_seg["pk"]
-
-        # Binned diagnostic stages. Keep signed values after noise subtraction.
-        k_debug, pk_raw_bin, pk_raw_err, n_raw_modes = bin_power_for_debug(
-            raw_ps_seg["k"], raw_ps_seg["pk"])
-        _, pk_noise_bin, _, n_noise_modes = bin_power_for_debug(
-            raw_ps_seg["k"], noise_ps_seg["pk"])
-        _, pk_sub_bin, pk_sub_err, n_sub_modes = bin_power_for_debug(
-            raw_ps_seg["k"], pk_corrected)
-
-        # Science spectrum retains the existing positive-power binning.
-        k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(
-            raw_ps_seg["k"], pk_corrected)
-
-        wave_center = np.mean(wave_obs_forest[indices])
-        segment_z = wave_center / 1215.67 - 1.0
-        segment_ps.append({
-            "z": segment_z,
-            "k_bin": k_bin,
-            "pk_bin": pk_bin,
-            "pk_err": pk_err,
-            "n_modes": n_modes,
-            # Diagnostic arrays, all binned on the same science k bins:
-            "k_debug_bin": k_debug,
-            "pk_raw_bin": pk_raw_bin,
-            "pk_raw_err_bin": pk_raw_err,
-            "pk_noise_bin": pk_noise_bin,
-            "pk_sub_bin": pk_sub_bin,
-            "pk_sub_err_bin": pk_sub_err,
-            "n_raw_modes": n_raw_modes,
-            "n_noise_modes": n_noise_modes,
-            "n_sub_modes": n_sub_modes,
-            "P_noise": noise_ps_seg["P_noise"],
-            "n_high_k": noise_ps_seg["n_high_k"],
-            "logk_noise_min": noise_ps_seg["logk_noise_min"],
-        })
-
-    average_ps = average_segment_power_spectra(segment_ps)
-
-    if average_ps is None:
-        return None
-
-    # --------------------------------------------------
-    # 5) Full forest (diagnostic only)
-    # --------------------------------------------------
-    raw_ps = power_spectrum_lomb_raw(velocity[good],deltaF[good],dv_forest,L_velocity_full)
-    #noise_ps = estimate_noise_periodogram(velocity[good],error_forest[good],smooth[good],dv_forest,L_velocity_full)
-    noise_ps= estimate_noise_high_k(raw_ps)
-    pk_corrected = raw_ps["pk"] - noise_ps["pk"]
-
-    # Binned full-forest diagnostic stages (not used as the science result).
-    k_debug, pk_raw_bin, pk_raw_err_bin, n_raw_modes = bin_power_for_debug(
-        raw_ps["k"], raw_ps["pk"])
-    _, pk_noise_bin, _, n_noise_modes = bin_power_for_debug(
-        raw_ps["k"], noise_ps["pk"])
-    _, pk_sub_bin, pk_sub_err_bin, n_sub_modes = bin_power_for_debug(
-        raw_ps["k"], pk_corrected)
-
-    k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(
-        raw_ps["k"], pk_corrected)
-
-    return {
-        "wave_obs": wave_obs_forest,
-        "wave_rest": wave_rest,
-        "flux_forest": flux_forest,
-        "smooth": smooth,
-        "deltaF": deltaF,
-        "chi_forest": chi_forest,
-        "velocity": velocity,
-        "dv_forest": dv_forest,
-        "n_good": np.sum(good),
-        "window_cMpc": window_cMpc,
-        "n_modes": average_ps["n_modes"],
-
-        # Raw full-forest spectrum (diagnostic)
-        "k": raw_ps["k"],
-        "pk": raw_ps["pk"],
-        "noise_pk": noise_ps["pk"],
-        "pk_corrected": pk_corrected,
-        "P_noise": noise_ps["P_noise"],
-        "n_high_k": noise_ps["n_high_k"],
-        "logk_noise_min": noise_ps["logk_noise_min"],
-        "k_debug_bin": k_debug,
-        "pk_raw_bin": pk_raw_bin,
-        "pk_raw_err_bin": pk_raw_err_bin,
-        "pk_noise_bin": pk_noise_bin,
-        "pk_sub_bin": pk_sub_bin,
-        "pk_sub_err_bin": pk_sub_err_bin,
-        "n_raw_modes": n_raw_modes,
-        "n_noise_modes": n_noise_modes,
-        "n_sub_modes": n_sub_modes,
-
-        # Individual corrected segment spectra
-        "segment_ps": segment_ps,
-
-        # Final science result (Boera et al.)
-        "k_bin": average_ps["k_bin"],
-        "pk_bin": average_ps["pk_bin"],
-        "pk_err": average_ps["pk_err"],
-    }
-
-
-# SECTION 2.5 : COMOVING-SPACE UTILITIES
-
-# 2.5.1 Rebin a spectrum
-def rebin_spectrum(wave, flux, error, factor=2):
-    n = (len(flux) // factor) * factor
-    wave = wave[:n]
-    flux = flux[:n]
-    error = error[:n]
-    wave_rebin = wave.reshape(-1, factor).mean(axis=1)
-    flux_rebin = flux.reshape(-1, factor).mean(axis=1)
-    error_rebin = (np.sqrt(np.sum(error.reshape(-1, factor)**2,axis=1)) / factor)
-    return (wave_rebin,flux_rebin,error_rebin)
-
-# 2.5.2 Convert rolling window from cMpc to pixels
-def rolling_window_pixels(window_cMpc, chi):    #Convert a physical window (h^-1 cMpc) into an equivalent number of pixels.
-    spacing = mean_pixel_spacing(chi)
-    window_pixels = int(np.round(window_cMpc / spacing))
-    if window_pixels % 2 == 0:
-        window_pixels += 1
-    return max(3, window_pixels)
-
-# 2.5.3 Compute comoving coordinate
-def comoving_coordinate(wave):    #Comoving coordinate of each pixel in h^-1 cMpc.
-    z = wave / 1215.67 - 1.0
-    chi = cosmo.comoving_distance(z).value
-    return chi * cosmo.h
-
-# 2.5.4 Compute mean pixel spacing
-def mean_pixel_spacing(chi): #Mean pixel spacing in h^-1 cMpc.
-    return np.mean(np.diff(chi))
-
-# 2.5.5 Split the Lyα forest into fixed comoving segments
-def split_into_segments(chi, segment_length=20.0):
-    #Parameters
-    #chi : ndarray  Comoving coordinate (h^-1 cMpc).
-    #segment_length : float Segment size in h^-1 cMpc.
-    #Returns segments : List of index arrays, one array per complete segment.
-    
-    if len(chi) == 0:
-        return []
-
-    chi0 = chi[0]
-    chi_end = chi[-1]
-    n_segments = int((chi_end - chi0) // segment_length)
-    segments = []
-
-    for i in range(n_segments):
-        start = chi0 + i * segment_length
-        stop = start + segment_length
-        indices = np.where((chi >= start) & (chi < stop))[0]
-        if len(indices) > 1:
-            segments.append(indices)
-    return segments
-
-# 2.5.6 Average segment power spectra
-def average_segment_power_spectra(segment_ps):
-
-    if len(segment_ps) == 0:
-        return None
-
-    k_bin = segment_ps[0]["k_bin"]
-
-    # Shape: (n_segments, n_bins)
-    pk = np.array([ps["pk_bin"] for ps in segment_ps])
-
-    # Number of finite measurements contributing to each bin
-    valid_counts = np.sum(np.isfinite(pk), axis=0)
-
-    # Initialise outputs
-    mean_pk = np.full(pk.shape[1], np.nan)
-    std_pk = np.full(pk.shape[1], np.nan)
-
-    # Mean: only where at least one segment contributes
-    good_mean = valid_counts > 0
-    if np.any(good_mean):
-        mean_pk[good_mean] = np.nanmean(pk[:, good_mean],axis=0)
-
-    # Standard deviation: only where at least two segments contribute
-    good_std = valid_counts > 1
-    if np.any(good_std):
-        #std_pk[good_std] = np.nanstd(pk[:, good_std],axis=0,ddof=1)
-
-        std_pk[good_std] = (np.nanstd(pk[:, good_std],axis=0,ddof=1)/ np.sqrt(valid_counts[good_std]))
-
-
-    # Total contributing modes
-    total_modes = np.sum([ps["n_modes"] for ps in segment_ps],axis=0)
-    
-    return {
-        "k_bin": k_bin,
-        "pk_bin": mean_pk,
-        "pk_err": std_pk,
-        "n_modes": total_modes}
-
-# 2.5.7 Group segments into redshift bins
-def group_segments_by_redshift(all_segments, redshift_bins):
-    grouped = {}
-    for zmin, zmax in redshift_bins:
-        key = (zmin, zmax)
-        grouped[key] = [seg for seg in all_segments if zmin <= seg["z"] < zmax]
-    return grouped
-
-# SECTION 2.6 : VISUALIZATION UTILITIES
-
-# 2.6.1 Plot download configuration
-def plotly_download_config(quasar_name,graph_name):
-    return {"toImageButtonOptions": {"format": "png","filename":f"{quasar_name}_{graph_name}","height": 800,"width": 1200,"scale": 2}}
-
-# SECTION 2.7 : THE PLOTS STUFF 
-
-def bin_power_for_debug(k, pk):
-    """
-    Bin power in linear units while retaining negative noise-subtracted values.
-    This is for diagnostics; the existing science binning function is unchanged.
-    """
-    k = np.asarray(k, dtype=float)
-    pk = np.asarray(pk, dtype=float)
-    n_bins = len(K_BIN_EDGES) - 1
-
-    k_bin = 10 ** (0.5 * (K_BIN_EDGES[:-1] + K_BIN_EDGES[1:]))
-    pk_bin = np.full(n_bins, np.nan)
-    pk_err = np.full(n_bins, np.nan)
-    n_modes = np.zeros(n_bins, dtype=int)
-
-    valid_k = np.isfinite(k) & (k > 0)
-    logk = np.full(k.shape, np.nan)
-    logk[valid_k] = np.log10(k[valid_k])
-
-    for i in range(n_bins):
-        m = (
-            valid_k
-            & np.isfinite(pk)
-            & (logk >= K_BIN_EDGES[i])
-            & (logk < K_BIN_EDGES[i + 1])
-        )
-        values = pk[m]
-        n_modes[i] = values.size
-
-        if values.size == 0:
-            continue
-
-        pk_bin[i] = np.mean(values)
-        if values.size > 1:
-            pk_err[i] = np.std(values, ddof=1) / np.sqrt(values.size)
-
-    return k_bin, pk_bin, pk_err, n_modes
-
-
-
-# SECTION 3 : ANALYSIS PIPELINE
-
-# SECTION 3.1 : USER INPUTS IN SIDEBAR
-
-window_cMpc = st.sidebar.number_input("Rolling Mean Window (h⁻¹ cMpc)",min_value=10.0,max_value=100.0,value=40.0,step=5.0)
-st.sidebar.caption("Notation: cMpc = comoving Mpc")
-
-segment_length = st.sidebar.number_input("Segment Length (h⁻¹ cMpc)",min_value=5.0,max_value=50.0,value=20.0,step=1.0)
-
-logk_min = st.sidebar.number_input("Minimum log10(k)",value=-2.2,step=0.1)
-logk_max = st.sidebar.number_input("Maximum log10(k)",value=-0.7,step=0.1)
-delta_logk = st.sidebar.number_input("Δlog10(k)",value=0.1,step=0.01)
-
-
-#K_BIN_EDGES = np.arange(logk_min,logk_max + delta_logk,delta_logk)
-
-
-
-# 1. Compute the exact number of steps/bins needed
-# We add a tiny epsilon (1e-9) to prevent rounding down due to float precision
-num_steps = int(np.round((logk_max - logk_min) / delta_logk))
-
-# 2. Number of edges is always number of steps + 1
-num_edges = num_steps + 1
-
-# 3. Reliably generate the array including the exact endpoint
-#K_BIN_EDGES = np.linspace(logk_min, logk_max, num_edges)
-K_BIN_CENTERS = np.arange(-2.2, -0.7 + 0.001, 0.1)
-
-K_BIN_EDGES = np.concatenate([
-    [K_BIN_CENTERS[0] - 0.05],
-    0.5 * (K_BIN_CENTERS[:-1] + K_BIN_CENTERS[1:]),
-    [K_BIN_CENTERS[-1] + 0.05]])
-
-# SECTION 3.2 : LOAD AND PREPARE SPECTRA
-
-pairs = find_pairs(SPEC_DIR)
-summary_rows = []
-spectra = []
-
-if len(pairs) == 0:
-    st.error(f"No matched spectra found in {SPEC_DIR}")
-    st.stop()
-
-for key, files in pairs.items():
-    try:
-        flux, header = load_fits(files["flux"])
-        error, _ = load_fits(files["error"])
-        n = len(flux)
-        wave = wavelength_array(header,n)
-        snr, median_snr, masked_fraction = (snr_calculations(n,header,flux,error))
-        object_name = header.get("OBJECT",key)
-        instrument = header.get("INSTRUME","Unknown")
-        z = redshifts[key]
-        dv = velocity_spacing(header)
-        chi = comoving_coordinate(wave)
-
-        window_pixels = rolling_window_pixels(window_cMpc,chi)
-
-        pixel_spacing = mean_pixel_spacing(chi)
-        
-        ps_fft = (lya_power_spectrum_fft(wave,flux,error,z))
-        ps_lomb = lya_power_spectrum_lomb(wave,flux,error,z,window_cMpc,segment_length)        
-        spectra.append({
-            "object": object_name,
-            "z": z,
-            "instrument": instrument,
-            "wave": wave,
-            "flux": flux,
-            "error": error,
-            "snr": snr,
-            #"header": header,
-            "median_snr": median_snr,
-            "masked_fraction": masked_fraction,
-            "dv": dv,
-            "ps_fft": ps_fft,
-            "ps_lomb": ps_lomb,
-            "window_pixels": window_pixels,
-            "chi": chi,
-            "pixel_spacing": pixel_spacing,
-            "segment_length": segment_length,
-            "window_cMpc": window_cMpc})
-
-        summary_rows.append({
-            "Object": object_name,
-            "z": z,
-            "Instrument": instrument,
-            "Pixels": len(flux),
-            "Lambda Min": wave.min(),
-            "Lambda Max": wave.max(),
-            "Median S/N": median_snr,
-            "Masked %": masked_fraction,
-            "dv (km/s)": dv,
-            "Pixel Spacing (h⁻¹ cMpc)": pixel_spacing,
-            "Rolling Window (h⁻¹ cMpc)": window_cMpc,
-            "Window Pixels": window_pixels})
-
-    except Exception as e:
-        st.info(f"{key}: {e}")
-
-# Collect all 10 h^-1 cMpc segments from every quasar
-
-all_segments = []
-for spec in spectra:
-
-    if spec["ps_lomb"] is None:
-        continue
-
-    all_segments.extend(spec["ps_lomb"]["segment_ps"])
-
-REDSHIFT_BINS = [
-    (4.0, 4.4),
-    (4.4, 4.8),
-    (4.8, 5.2)]
-
-grouped_segments = group_segments_by_redshift(all_segments,REDSHIFT_BINS)
-
-# Average power spectrum in each redshift bin
-redshift_results = {}
-
-for zbin, segments in grouped_segments.items():
-
-    if len(segments) == 0:
-        continue
-
-    redshift_results[zbin] = average_segment_power_spectra(segments)
-
-
-
-
-# SECTION 4 : RESULTS AND VISUALISATION
-
-#-----section 4.0: Setup-------------------------
-st.title("Power spectrum")
-
-#-----section 4.1: combined result-------------------------
-st.header("Combined Lyα Forest Power Spectrum")
-st.caption("Average Lomb–Scargle power spectrum grouped by redshift.")
-
-fig = go.Figure()
-
-for (zmin, zmax), result in redshift_results.items():
-    valid = (np.isfinite(result["pk_bin"]) & (result["pk_bin"] > 0))
-    fig.add_trace(go.Scatter(
-            x=np.log10(result["k_bin"][valid]),
-            y=np.log10(result["k_bin"][valid] * result["pk_bin"][valid]/ np.pi),
-            mode="markers+lines",
-            name=f"{zmin:.1f} ≤ z < {zmax:.1f}",
-
-            error_y=dict(type="data",array=(result["pk_err"][valid] / (result["pk_bin"][valid]* np.log(10))),visible=True,),))
-
-fig.update_layout(title="Mean Lyα Forest Power Spectrum",
-    xaxis_title="log₁₀(k / km⁻¹ s)",
-    yaxis_title="log₁₀(kP(k)/π)",
-    legend_title="Redshift bin")
-
-st.plotly_chart(fig, width="stretch")
-
-
-
-
-
-fig2 = go.Figure()
-
-for (zmin, zmax), result in redshift_results.items():
-    valid = (np.isfinite(result["pk_bin"]) & (result["pk_bin"] > 0))
-    fig2.add_trace(go.Scatter(
-            x=np.log10(result["k_bin"][valid]),
-            y=np.log10(result["k_bin"][valid] * result["pk_bin"][valid]/ (0.76*np.pi)),
-            mode="markers+lines",
-            name=f"{zmin:.1f} ≤ z < {zmax:.1f}",
-
-            error_y=dict(type="data",array=(result["pk_err"][valid] / (result["pk_bin"][valid]* np.log(10))),visible=True,),))
-
-fig2.update_layout(title="Mean Lyα Forest Power Spectrum 2",
-    xaxis_title="log₁₀(k / km⁻¹ s)",
-    yaxis_title="log₁₀(kP(k)/π)",
-    legend_title="Redshift bin")
-
-st.plotly_chart(fig2, width="stretch")
-
-
-
-
-
-
-summary = []
-
-for (zmin, zmax), segments in grouped_segments.items():
-    summary.append({
-        "Redshift bin": f"{zmin:.1f}–{zmax:.1f}",
-        "Segments": len(segments),})
-
-st.dataframe(pd.DataFrame(summary), width="stretch")
-
-summary_df = pd.DataFrame(summary_rows)
-st.header("Dataset Summary")
-st.dataframe(summary_df,width='stretch')
-
-
-
-
-#showfft=st.checkbox("Show FFT")
-
-
-#st.header("Individual Spectra")
-
-
-spectra_bytes = pickle.dumps(
-
-    spectra,
-
-    protocol=pickle.HIGHEST_PROTOCOL)
-
-st.download_button(
-
-    label="Download spectra dictionary",
-
-    data=spectra_bytes,
-
-    file_name="spectra.pkl",
-
-    mime="application/octet-stream",
-
-    key="download_spectra_dictionary")
-
-
-
-
-
-
-#________________________
-#________________________
-#________________________
-#________________________
-
-
-# SECTION 4 : RESULTS AND VISUALISATION
-
-#-----section 4.0: Setup-------------------------
-st.title("Power spectrum")
-
-#-----section 4.1: combined result-------------------------
-
-fig = go.Figure()
-
-for (zmin, zmax), result in redshift_results.items():
-    valid = (np.isfinite(result["pk_bin"]) & (result["pk_bin"] > 0))
-    fig.add_trace(go.Scatter(
-            x=np.log10(result["k_bin"][valid]),
-            y=np.log10(result["k_bin"][valid] * result["pk_bin"][valid]/ np.pi),
-            mode="markers+lines",
-            name=f"{zmin:.1f} ≤ z < {zmax:.1f}",
-
-            error_y=dict(type="data",array=(result["pk_err"][valid] / (result["pk_bin"][valid]* np.log(10))),visible=True,),))
-
-
-
-
-
-
-labels = [
-    f"{i}: {spec['object']} (z = {spec['z']})"
-    for i, spec in enumerate(spectra)
-]
-
-selected_label = st.selectbox("Select a quasar", labels)
-
-st.header(f"Plots for {selected_label}")
-selected_index = labels.index(selected_label)
-spec = spectra[selected_index]
-
-#-----section 4.2.1: Extract Stored Data
-flux = spec["flux"]
-error = spec["error"]
-wave = spec["wave"]
-snr = spec["snr"]
-ps_fft = spec["ps_fft"]
-
-window_cMpc = spec.get("window_cMpc", window_cMpc if "window_cMpc" in locals() else 40.0)
-ps_lomb = lya_power_spectrum_lomb(wave, flux, error, spec["z"], window_cMpc, segment_length)
-
-if ps_lomb is not None:
-    window_pixels = spec.get("window_pixels", np.nan)
-
-with st.expander("Graph 1A:noise subtraction (bin orignal)",expanded=False):
-    k = np.asarray(ps_lomb["k"], dtype=float)
-    pk_raw = np.asarray(ps_lomb["pk"], dtype=float)
-    pk_noise = np.asarray(ps_lomb["noise_pk"], dtype=float)
-    P_noise = float(np.nanmedian(pk_noise))
-
-
-    st.write("### Noise Subtraction Diagnostics")
-
-    # Retrieve the actual arrays from ps_lomb
-    k = ps_lomb["k"]
-    pk_original = ps_lomb["pk"]
-    pk_corrected = ps_lomb["pk_corrected"]
-    noise_pk = ps_lomb["noise_pk"]
-
-    st.write("Raw k range:", float(np.nanmin(k)), float(np.nanmax(k)))
-    st.write("Total raw k points:", len(k))
-
-    original_valid = ()
-    corrected_valid = ()
-
-    # Use the diagnostic bins already calculated in the pipeline
-    k_bin = np.asarray(ps_lomb["k_debug_bin"], dtype=float)
-    pk_raw_bin = np.asarray(ps_lomb["pk_raw_bin"], dtype=float)
-    pk_noise_bin = np.asarray(ps_lomb["pk_noise_bin"], dtype=float)
-    pk_corrected_bin = np.asarray(ps_lomb["pk_sub_bin"], dtype=float)
-    # Keep only positive powers for the logarithmic y-axis.
-    raw_ok = (k_bin > 0) & (pk_raw_bin > 0)
-    corrected_ok = (k_bin > 0) & (pk_corrected_bin > 0)
-
-    logk_raw = np.log10(k_bin[raw_ok])
-    logk_corrected = np.log10(k_bin[corrected_ok])
-
-    fig_noise_subtraction = go.Figure()
-
-    # Original binned power: black
-    fig_noise_subtraction.add_trace(go.Scatter(
-        x=logk_raw,
-        y=np.log10(pk_raw_bin[raw_ok]),
-        mode="lines",
-        name="Original",
-        line=dict(color="black", width=2)))
-
-    # Corrected binned power: green
-    fig_noise_subtraction.add_trace(go.Scatter(
-        x=logk_corrected,
-        y=np.log10(pk_corrected_bin[corrected_ok]),
-        mode="lines",
-        name="Corrected",
-        line=dict(color="green", width=2)))
-
-    # Constant noise level: red dashed
-    fig_noise_subtraction.add_hline(
-        y=np.log10(P_noise),
-        line_color="red",
-        line_width=2,
-        line_dash="dash",
-        annotation_text="",)
-
-    # Add a legend entry for the horizontal noise line.
-    fig_noise_subtraction.add_trace(go.Scatter(
-        x=[None],
-        y=[None],
-        mode="lines",
-        name="Noise level",
-        line=dict(color="red", width=2, dash="dash")))
-
-    fig_noise_subtraction.update_layout(
-        title="Noise subtraction ",
-        xaxis_title="log₁₀(k / km⁻¹ s)",
-        yaxis_title="log₁₀(P(k))",
-        hovermode="x unified",)
-
-    st.plotly_chart(fig_noise_subtraction,width="stretch",config=plotly_download_config(spec["object"],"Boera_Figure5_Noise_Subtraction"))
-
-
-
-
-with st.expander("Graph 1B: Noise subtraction (binned extended)", expanded=True):
-
-
-    # Use precomputed values from spectra.pkl
-    k = np.asarray(ps_lomb["k"], dtype=float)
-    pk_original = np.asarray(ps_lomb["pk"], dtype=float)
-    pk_corrected = np.asarray(ps_lomb["pk_corrected"], dtype=float)
-    noise_pk = np.asarray(ps_lomb["noise_pk"], dtype=float)
-
-    # --------------------------------------------------
-    # 1. Select valid original power and noise values
-    # --------------------------------------------------
-    valid_raw = (
-        np.isfinite(k) &
-        (k > 0) &
-        np.isfinite(pk_original) &
-        (pk_original > 0)
-    )
-
-    logk_raw = np.log10(k[valid_raw])
-    pk_raw = pk_original[valid_raw]
-
-    valid_noise = np.isfinite(noise_pk) & (noise_pk > 0)
-
-    if not np.any(valid_noise):
-        st.warning("No valid stored noise estimates are available.")
-    else:
-        P_noise = float(np.median(noise_pk[valid_noise]))
-
-        # --------------------------------------------------
-        # 2. Common bin edges, extending to high k
-        # --------------------------------------------------
-        bin_edges = np.arange(-2.25, 0.151, 0.1)
-
-        bin_centres = []
-        bin_original = []
-        bin_corrected = []
-
-        for left, right in zip(bin_edges[:-1], bin_edges[1:]):
-            mask = (
-                (logk_raw >= left) &
-                (logk_raw < right)
-            )
-
-            if not np.any(mask):
-                continue
-
-            # Arithmetic mean in LINEAR power units
-            P_original_bin = np.mean(pk_raw[mask])
-
-            # Subtract noise in linear units
-            P_corrected_bin = P_original_bin - P_noise
-
-            bin_centres.append(0.5 * (left + right))
-            bin_original.append(P_original_bin)
-            bin_corrected.append(P_corrected_bin)
-
-        bin_centres = np.asarray(bin_centres)
-        bin_original = np.asarray(bin_original)
-        bin_corrected = np.asarray(bin_corrected)
-
-        # --------------------------------------------------
-        # 3. Plot both spectra using identical bins
-        # --------------------------------------------------
-        fig_noise_subtraction = go.Figure()
-
-        # Original spectrum
-        positive_original = bin_original > 0
-
-        fig_noise_subtraction.add_trace(go.Scatter(
-            x=bin_centres[positive_original],
-            y=np.log10(bin_original[positive_original]),
-            mode="lines+markers",
-            name="Original P(k)",
-            line=dict(color="black", width=1.5),
-            marker=dict(size=5)
-        ))
-
-        # Noise-subtracted spectrum.
-        # Non-positive values cannot be shown on a log scale.
-        positive_corrected = bin_corrected > 0
-
-        fig_noise_subtraction.add_trace(go.Scatter(
-            x=bin_centres[positive_corrected],
-            y=np.log10(bin_corrected[positive_corrected]),
-            mode="lines+markers",
-            name="Noise-subtracted P(k)",
-            line=dict(color="green", width=1.5),
-            marker=dict(size=5)
-        ))
-
-        # Constant stored noise level
-        fig_noise_subtraction.add_hline(
-            y=np.log10(P_noise),
-            line_color="red",
-            line_width=2,
-            line_dash="dash",
-            annotation_text="Noise level",
-            annotation_position="top left"
-        )
-
-        # --------------------------------------------------
-        # 4. Format the graph
-        # --------------------------------------------------
-        fig_noise_subtraction.update_layout(
-            title="Original Power Spectrum and Noise Subtraction",
-            xaxis_title="log₁₀(k / km⁻¹ s)",
-            yaxis_title="log₁₀(P(k))",
-            hovermode="x unified",
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="left",
-                x=0
-            )
-        )
-
-        fig_noise_subtraction.update_xaxes(
-            range=[-2.25, 0.15]
-        )
-
-        st.plotly_chart(
-            fig_noise_subtraction,
-            width="stretch",
-            config=plotly_download_config(
-                spec["object"],
-                "Boera_Figure5_Noise_Subtraction"
-            )
-        )
-
-
-
-
-
-
-with st.expander("Graph 2: Flux vs wavelength with rolling mean",expanded=True):
-    ps_lomb = spec["ps_lomb"]
-
-    # Observed-frame Lyα forest data and stored rolling mean
-    wave = np.asarray(ps_lomb["wave_obs"], dtype=float)
-    flux = np.asarray(ps_lomb["flux_forest"], dtype=float)
-    rolling_mean = np.asarray(ps_lomb["smooth"], dtype=float)
-
-    fig_flux = go.Figure()
-
-    fig_flux.add_trace(go.Scatter(
-        x=wave,
-        y=flux,
-        mode="lines",
-        name="Flux",
-        line=dict(color="black", width=1)))
-
-    fig_flux.add_trace(go.Scatter(
-        x=wave,
-        y=rolling_mean,
-        mode="lines",
-        name="Rolling mean (40 h⁻¹ cMpc)",
-        line=dict(color="red", width=2)))
-
-    fig_flux.update_layout(
-        title="Lyα Forest Flux and Rolling Mean",
-        xaxis=dict(
-            title="Observed wavelength (Å)",
-            type="log"),
-        yaxis_title="Flux",
-        hovermode="x unified")
-
-    st.plotly_chart(fig_flux,
-        width="stretch",
-        config=plotly_download_config(
-            spec["object"],
-            "Flux_vs_Wavelength_Rolling_Mean"))
-
-
-
-
-
-
-
-
-
-with st.expander("Graph 3: Power Spectrum by Segment",expanded=True):
-    segment_ps = ps_lomb["segment_ps"]
-
-    if len(segment_ps) == 0:
-        st.info("No segments available for this quasar.")
-
-    else:
-        n_segments = len(segment_ps)
-        ncols = 3
-        nrows = (n_segments + ncols - 1) // ncols
-
-        fig_segments = make_subplots(
-            rows=nrows,
-            cols=ncols,
-            subplot_titles=[
-                f"Segment {i + 1}"
-                for i in range(n_segments)
-            ],
-            horizontal_spacing=0.08,
-            vertical_spacing=0.12
-        )
-
-        for i, seg in enumerate(segment_ps):
-            row = i // ncols + 1
-            col = i % ncols + 1
-
-            k = np.asarray(seg["k_bin"], dtype=float)
-            pk = np.asarray(seg["pk_bin"], dtype=float)
-
-            valid = (
-                np.isfinite(k)
-                & np.isfinite(pk)
-                & (k > 0)
-                & (pk > 0)
-            )
-
-            log_k = np.log10(k[valid])
-            log_kP = np.log10(k[valid] * pk[valid] / np.pi)
-
-            fig_segments.add_trace(
-                go.Scatter(
-                    x=log_k,
-                    y=log_kP,
-                    mode="lines+markers",
-                    name=f"Segment {i + 1}",
-                    marker=dict(size=4),
-                    line=dict(width=1.5),
-                    showlegend=False
-                ),
-                row=row,
-                col=col
-            )
-
-        fig_segments.update_xaxes(title_text="log₁₀(k / (km⁻¹ s))",matches="x")
-
-        fig_segments.update_yaxes(title_text="log₁₀[kP(k) / π]",matches="y")
-
-        fig_segments.update_layout(
-            title=f"{spec['object']}: Power Spectrum by Segment",
-            height=300 * nrows,
-            showlegend=False,
-            hovermode="closest"
-        )
-
-        st.plotly_chart(
-            fig_segments,
-            width="stretch",
-            config=plotly_download_config(
-                spec["object"],
-                "Lomb_Scargle_Power_Spectrum_By_Segment"
-            )
-        )
-
-
-# ============================================================
-# OVERALL POWER SPECTRUM FOR THIS QUASAR
-# ============================================================
-
-with st.expander(" Quasar Power Spectrum",expanded=True):
-    k_avg = np.asarray(ps_lomb["k_bin"], dtype=float)
-    pk_avg = np.asarray(ps_lomb["pk_bin"], dtype=float)
-    pk_err = np.asarray(ps_lomb["pk_err"], dtype=float)
-
-    valid = (
-        np.isfinite(k_avg)
-        & np.isfinite(pk_avg)
-        & (k_avg > 0)
-        & (pk_avg > 0)
-    )
-
-    fig_overall = go.Figure()
-
-    fig_overall.add_trace(
-        go.Scatter(
-            x=np.log10(k_avg[valid]),
-            y=np.log10(k_avg[valid] * pk_avg[valid] / np.pi),
-            error_y=dict(
-                type="data",
-                array=(
-                    pk_err[valid]
-                    / (pk_avg[valid] * np.log(10))
-                ),
-                visible=True
-            ),
-            mode="lines+markers",
-            name="Overall spectrum",
-            line=dict(color="black", width=2),
-            marker=dict(size=6)
-        )
-    )
-
-    fig_overall.update_layout(
-        title=f"{spec['object']}: Overall Lyα Flux Power Spectrum",
-        xaxis_title="log₁₀(k / (km⁻¹ s))",
-        yaxis_title="log₁₀[kP(k) / π]",
-        hovermode="x unified"
-    )
-
-    st.plotly_chart(
-        fig_overall,
-        width="stretch",
-        config=plotly_download_config(
-            spec["object"],
-            "Overall_Quasar_Power_Spectrum"
-        )
-    )
-
-
-#---------------------------------
-
-
-
-# Collect segments and preserve their parent quasar names
-
-all_segments = []
-
-for spec in spectra:
-    if spec["ps_lomb"] is None:
-        continue
-
-    for i, seg in enumerate(spec["ps_lomb"]["segment_ps"]):
-        segment = seg.copy()
-        segment["quasar"] = spec["object"]
-        segment["segment_number"] = i + 1
-        all_segments.append(segment)
-
+# These are absorber-redshift bins, not quasar-emission-redshift bins.
 REDSHIFT_BINS = [
     (4.0, 4.4),
     (4.4, 4.8),
     (4.8, 5.2),
 ]
 
-grouped_segments = group_segments_by_redshift(
-    all_segments, REDSHIFT_BINS
-)
 
-redshift_results = {}
-
-for zbin, segments in grouped_segments.items():
-    if len(segments) == 0:
-        continue
-
-    redshift_results[zbin] = average_segment_power_spectra(
-        segments
-    )
+# -----------------------------------------------------------------------------
+# SECTION 2: GENERAL DATA HANDLING
+# -----------------------------------------------------------------------------
 
 
-# ============================================================
-# PLOT 1: FINAL POWER SPECTRUM FOR EACH REDSHIFT BIN
-# ============================================================
+def load_fits_1d(path: Path) -> tuple[np.ndarray, fits.Header]:
+    """Load the first non-empty FITS HDU and require a one-dimensional array."""
+    with fits.open(path, memmap=False) as hdul:
+        for hdu in hdul:
+            if hdu.data is None:
+                continue
+            arr = np.asarray(np.squeeze(hdu.data), dtype=float)
+            if arr.ndim != 1:
+                raise ValueError(
+                    f"Expected a 1D spectrum in {path.name}; found shape {arr.shape}."
+                )
+            return arr.copy(), hdu.header.copy()
+    raise ValueError(f"No spectrum data found in {path}")
 
-st.header("Final Power Spectrum by Redshift")
 
-fig_final = go.Figure()
+def wavelength_array(header: fits.Header, n_pixels: int) -> np.ndarray:
+    """Build wavelength from the logarithmic FITS WCS used by the input files.
 
-for (zmin, zmax), result in redshift_results.items():
-    k = result["k_bin"]
-    pk = result["pk_bin"]
-    err = result["pk_err"]
+    The input scripts assume CRVAL1/CDELT1 describe log10(wavelength). This
+    version also honours CRPIX1 (default 1), which is the standard FITS linear
+    WCS reference-pixel convention.
+    """
+    required = ("CRVAL1", "CDELT1")
+    missing = [key for key in required if key not in header]
+    if missing:
+        raise KeyError(f"Missing FITS wavelength keyword(s): {', '.join(missing)}")
 
-    valid = (
-        np.isfinite(k)
-        & np.isfinite(pk)
-        & (k > 0)
-        & (pk > 0)
-    )
+    crval = float(header["CRVAL1"])
+    cdelt = float(header["CDELT1"])
+    crpix = float(header.get("CRPIX1", 1.0))
+    pixel_numbers = np.arange(n_pixels, dtype=float) + 1.0
+    log10_wave = crval + (pixel_numbers - crpix) * cdelt
+    wave = 10.0**log10_wave
 
-    # Convert the uncertainty in P to uncertainty in log10(kP/pi)
-    valid_err = np.where(
-        np.isfinite(err[valid]) & (err[valid] >= 0),
-        err[valid] / (pk[valid] * np.log(10)),
-        np.nan,
-    )
+    if not np.all(np.isfinite(wave)) or np.any(wave <= 0):
+        raise ValueError("FITS header produced invalid wavelength values.")
+    return wave
 
-    fig_final.add_trace(go.Scatter(
-        x=np.log10(k[valid]),
-        y=np.log10(k[valid] * pk[valid] / np.pi),
-        mode="lines+markers",
-        name=f"{zmin:.1f} ≤ z < {zmax:.1f}",
-        error_y=dict(
-            type="data",
-            array=valid_err,
-            visible=True,
-        ),
+
+def native_velocity_spacing(header: fits.Header) -> float:
+    """Native velocity pixel spacing in km/s from logarithmic wavelength WCS.
+
+    This is calculated from the original FITS grid rather than from the
+    forest array after bad pixels are removed. The latter can contain gaps.
+    """
+    cdelt = float(header["CDELT1"])
+    dv = abs(C_KMS * np.log(10.0) * cdelt)
+    if not np.isfinite(dv) or dv <= 0:
+        raise ValueError(f"Invalid native velocity spacing: {dv}")
+    return dv
+
+
+def find_flux_error_pairs(folder: Path) -> dict[str, dict[str, Path]]:
+    """Find matching *_flux.fits and *_error.fits files."""
+    pairs: dict[str, dict[str, Path]] = {}
+    if not folder.is_dir():
+        return pairs
+
+    for filename in sorted(os.listdir(folder)):
+        path = folder / filename
+        if not path.is_file() or not filename.lower().endswith(".fits"):
+            continue
+
+        if filename.endswith("_flux.fits"):
+            key = filename[: -len("_flux.fits")]
+            pairs.setdefault(key, {})["flux"] = path
+        elif filename.endswith("_error.fits"):
+            key = filename[: -len("_error.fits")]
+            pairs.setdefault(key, {})["error"] = path
+
+    return {
+        key: value
+        for key, value in pairs.items()
+        if "flux" in value and "error" in value
+    }
+
+
+def snr_calculations(flux: np.ndarray, error: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """Return pixel S/N, median S/N, and fraction of unusable input pixels."""
+    if flux.shape != error.shape:
+        raise ValueError("Flux and error arrays have different shapes.")
+
+    good = np.isfinite(flux) & np.isfinite(error) & (error > 0)
+    snr = np.full(flux.shape, np.nan, dtype=float)
+    snr[good] = flux[good] / error[good]
+    median_snr = float(np.nanmedian(snr)) if np.any(good) else float("nan")
+    masked_fraction = 100.0 * float(np.sum(~good)) / max(len(flux), 1)
+    return snr, median_snr, masked_fraction
+
+
+def quality_label(snr: float) -> str:
+    if not np.isfinite(snr):
+        return "Unavailable"
+    if snr > 20:
+        return "Excellent (>20)"
+    if snr > 10:
+        return "Good (>10)"
+    if snr > 5:
+        return "Moderate (>5)"
+    return "Poor (≤5)"
+
+
+# -----------------------------------------------------------------------------
+# SECTION 3: FOREST EXTRACTION AND COORDINATES
+# -----------------------------------------------------------------------------
+
+
+def extract_lya_forest(
+    wave_obs: np.ndarray,
+    flux: np.ndarray,
+    error: np.ndarray,
+    quasar_z: float,
+    rest_min: float = 1040.0,
+    rest_max: float = 1180.0,
+) -> dict[str, np.ndarray]:
+    """Extract usable pixels in the specified quasar-rest-frame Lyα forest."""
+    if not (wave_obs.shape == flux.shape == error.shape):
+        raise ValueError("Wavelength, flux, and error arrays must have equal shapes.")
+
+    wave_rest = wave_obs / (1.0 + quasar_z)
+    forest = (wave_rest >= rest_min) & (wave_rest <= rest_max)
+    good = np.isfinite(wave_obs) & np.isfinite(flux) & np.isfinite(error) & (error > 0)
+    mask = forest & good
+
+    return {
+        "wave_obs": wave_obs[mask],
+        "wave_rest": wave_rest[mask],
+        "flux": flux[mask],
+        "error": error[mask],
+    }
+
+
+def velocity_grid(wave_rest: np.ndarray, dv_native: float) -> tuple[np.ndarray, float]:
+    """Return v=c ln(lambda_rest) and the native detector pixel spacing."""
+    if len(wave_rest) < 2:
+        raise ValueError("At least two forest pixels are needed for velocity coordinates.")
+    velocity = C_KMS * np.log(wave_rest)
+    if np.any(np.diff(velocity) <= 0):
+        raise ValueError("Forest wavelengths must be strictly increasing.")
+    return velocity, float(dv_native)
+
+
+def comoving_coordinate(wave_obs: np.ndarray) -> np.ndarray:
+    """Comoving distance in h^-1 cMpc at the Lyα absorber redshift."""
+    absorber_z = wave_obs / LYA_REST_WAVELENGTH - 1.0
+    return np.asarray(COSMO.comoving_distance(absorber_z).value * COSMO.h, dtype=float)
+
+
+def mean_pixel_spacing(chi: np.ndarray) -> float:
+    if len(chi) < 2:
+        return float("nan")
+    return float(np.nanmedian(np.diff(chi)))
+
+
+def rolling_mean_flux(flux: np.ndarray, chi: np.ndarray, window_cMpc: float) -> np.ndarray:
+    """Calculate a centered rolling mean in comoving distance."""
+    if len(flux) != len(chi):
+        raise ValueError("Flux and comoving-coordinate arrays have different lengths.")
+    if window_cMpc <= 0:
+        raise ValueError("Rolling-mean window must be positive.")
+
+    half_window = 0.5 * window_cMpc
+    smooth = np.full(len(flux), np.nan, dtype=float)
+    for i in range(len(flux)):
+        left = np.searchsorted(chi, chi[i] - half_window, side="left")
+        right = np.searchsorted(chi, chi[i] + half_window, side="right")
+        values = flux[left:right]
+        values = values[np.isfinite(values)]
+        if values.size:
+            smooth[i] = float(np.mean(values))
+    return smooth
+
+
+def split_into_segments(chi: np.ndarray, segment_length: float) -> list[np.ndarray]:
+    """Split the extracted forest into complete, non-overlapping cMpc segments."""
+    if len(chi) == 0:
+        return []
+    if segment_length <= 0:
+        raise ValueError("Segment length must be positive.")
+    if np.any(np.diff(chi) < 0):
+        raise ValueError("Comoving coordinate must be sorted in increasing order.")
+
+    chi_start = float(chi[0])
+    chi_end = float(chi[-1])
+    n_segments = int(np.floor((chi_end - chi_start) / segment_length))
+    segments: list[np.ndarray] = []
+
+    for index in range(n_segments):
+        start = chi_start + index * segment_length
+        stop = start + segment_length
+        pixel_indices = np.flatnonzero((chi >= start) & (chi < stop))
+        if pixel_indices.size:
+            segments.append(pixel_indices)
+    return segments
+
+
+# -----------------------------------------------------------------------------
+# SECTION 4: SIGNED POWER-SPECTRUM BINNING AND AGGREGATION
+# -----------------------------------------------------------------------------
+
+
+def make_log_k_bins(logk_min: float, logk_max: float, delta_logk: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return evenly spaced log10(k) bin centers and corresponding edges."""
+    if delta_logk <= 0:
+        raise ValueError("Delta log10(k) must be positive.")
+    if logk_max <= logk_min:
+        raise ValueError("Maximum log10(k) must exceed minimum log10(k).")
+
+    n_intervals = int(np.floor((logk_max - logk_min) / delta_logk + 1e-10))
+    centers = logk_min + np.arange(n_intervals + 1, dtype=float) * delta_logk
+    if centers.size < 2:
+        raise ValueError("Choose a k range that contains at least two bin centers.")
+
+    # Extend each end by half a bin; internal edges are center midpoints.
+    edges = np.concatenate((
+        [centers[0] - 0.5 * delta_logk],
+        0.5 * (centers[:-1] + centers[1:]),
+        [centers[-1] + 0.5 * delta_logk],
     ))
-
-fig_final.update_layout(
-    title="Mean Lyα Forest Power Spectrum",
-    xaxis_title="log₁₀(k / (km⁻¹ s))",
-    yaxis_title="log₁₀[kP(k) / π]",
-    legend_title="Redshift bin",
-)
-
-st.plotly_chart(fig_final, width="stretch")
+    return centers, edges
 
 
-# ============================================================
-# PLOT 2: INDIVIDUAL SEGMENT CONTRIBUTIONS BY REDSHIFT
-# ============================================================
+def bin_power_spectrum_signed(
+    k: np.ndarray,
+    pk: np.ndarray,
+    k_bin_edges: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Bin P(k) in linear units while retaining all finite signed values.
 
-st.header("Segment Contributions to Each Redshift Bin")
+    The validity mask deliberately does NOT contain ``pk > 0``. Negative
+    noise-subtracted values contribute to the arithmetic mean and uncertainty.
+    Only non-finite powers and non-positive k values are excluded.
+    """
+    k = np.asarray(k, dtype=float)
+    pk = np.asarray(pk, dtype=float)
+    if k.shape != pk.shape:
+        raise ValueError("k and P(k) arrays must have identical shapes.")
 
-for (zmin, zmax), segments in grouped_segments.items():
+    n_bins = len(k_bin_edges) - 1
+    k_bin = 10.0 ** (0.5 * (k_bin_edges[:-1] + k_bin_edges[1:]))
+    pk_bin = np.full(n_bins, np.nan, dtype=float)
+    pk_err = np.full(n_bins, np.nan, dtype=float)
+    n_modes = np.zeros(n_bins, dtype=int)
 
-    if len(segments) == 0:
-        st.info(f"No segments in {zmin:.1f} ≤ z < {zmax:.1f}")
-        continue
+    valid_k = np.isfinite(k) & (k > 0)
+    logk = np.full(k.shape, np.nan, dtype=float)
+    logk[valid_k] = np.log10(k[valid_k])
 
-    result = redshift_results[(zmin, zmax)]
-
-    fig_segments = go.Figure()
-
-    # Individual segment spectra
-    for seg in segments:
-        k = seg["k_bin"]
-        pk = seg["pk_bin"]
-
-        valid = (
-            np.isfinite(k)
+    for i in range(n_bins):
+        in_bin = (
+            valid_k
             & np.isfinite(pk)
-            & (k > 0)
-            & (pk > 0)
+            & (logk >= k_bin_edges[i])
+            & (logk < k_bin_edges[i + 1])
+        )
+        values = pk[in_bin]  # signed values intentionally retained
+        n_modes[i] = int(values.size)
+        if values.size == 0:
+            continue
+
+        pk_bin[i] = float(np.mean(values))
+        if values.size > 1:
+            pk_err[i] = float(np.std(values, ddof=1) / np.sqrt(values.size))
+        else:
+            # A single Fourier mode has no within-bin scatter estimate.
+            pk_err[i] = np.nan
+
+    return k_bin, pk_bin, pk_err, n_modes
+
+
+def average_segment_power_spectra(
+    segment_ps: list[dict[str, Any]],
+    power_key: str = "pk_bin",
+    error_key: str | None = "pk_err",
+    modes_key: str | None = "n_modes",
+) -> dict[str, np.ndarray] | None:
+    """Average segment-bin powers in linear units, including negative values.
+
+    Segments are equally weighted, matching the averaging convention in the
+    supplied scripts. For bins with multiple segments, the reported error is
+    the standard error of the segment-to-segment scatter. For a bin with only
+    one contributing segment, its within-segment error is used when available.
+    """
+    if not segment_ps:
+        return None
+
+    k_bin = np.asarray(segment_ps[0]["k_bin"], dtype=float)
+    power_rows = []
+    error_rows = []
+    mode_rows = []
+
+    for segment in segment_ps:
+        values = np.asarray(segment.get(power_key, np.full_like(k_bin, np.nan)), dtype=float)
+        if values.shape != k_bin.shape:
+            raise ValueError(f"Inconsistent k-bin shape for {power_key}.")
+        power_rows.append(values)
+
+        if error_key is not None and error_key in segment:
+            errors = np.asarray(segment[error_key], dtype=float)
+            if errors.shape != k_bin.shape:
+                errors = np.full_like(k_bin, np.nan)
+        else:
+            errors = np.full_like(k_bin, np.nan)
+        error_rows.append(errors)
+
+        if modes_key is not None and modes_key in segment:
+            modes = np.asarray(segment[modes_key], dtype=float)
+            if modes.shape != k_bin.shape:
+                modes = np.zeros_like(k_bin)
+        else:
+            modes = np.zeros_like(k_bin)
+        mode_rows.append(modes)
+
+    powers = np.vstack(power_rows)
+    within_errors = np.vstack(error_rows)
+    modes = np.vstack(mode_rows)
+
+    finite = np.isfinite(powers)
+    n_segments = np.sum(finite, axis=0).astype(int)
+    mean_power = np.full(k_bin.shape, np.nan, dtype=float)
+    mean_error = np.full(k_bin.shape, np.nan, dtype=float)
+
+    has_data = n_segments > 0
+    for i in np.flatnonzero(has_data):
+        vals = powers[finite[:, i], i]
+        mean_power[i] = float(np.mean(vals))
+        if vals.size > 1:
+            mean_error[i] = float(np.std(vals, ddof=1) / np.sqrt(vals.size))
+        else:
+            candidate = within_errors[finite[:, i], i]
+            if candidate.size and np.isfinite(candidate[0]):
+                mean_error[i] = float(candidate[0])
+
+    return {
+        "k_bin": k_bin,
+        "pk_bin": mean_power,
+        "pk_err": mean_error,
+        "n_modes": np.sum(modes, axis=0).astype(int),
+        "n_segments": n_segments,
+    }
+
+
+def group_segments_by_redshift(
+    all_segments: list[dict[str, Any]],
+    redshift_bins: list[tuple[float, float]],
+) -> dict[tuple[float, float], list[dict[str, Any]]]:
+    return {
+        (z_min, z_max): [
+            seg for seg in all_segments if z_min <= float(seg["z"]) < z_max
+        ]
+        for z_min, z_max in redshift_bins
+    }
+
+
+# -----------------------------------------------------------------------------
+# SECTION 5: LOMB-SCARGLE AND NOISE ESTIMATION
+# -----------------------------------------------------------------------------
+
+
+def compute_k_ls(segment_velocity_length: float, dv_native: float) -> np.ndarray:
+    """Construct positive angular wavenumbers in (km/s)^-1."""
+    if not np.isfinite(segment_velocity_length) or segment_velocity_length <= 0:
+        return np.array([], dtype=float)
+    if not np.isfinite(dv_native) or dv_native <= 0:
+        return np.array([], dtype=float)
+
+    k_min = 2.0 * np.pi / segment_velocity_length
+    k_nyquist = np.pi / dv_native
+    n_max = int(np.floor(k_nyquist / k_min))
+    if n_max < 1:
+        return np.array([], dtype=float)
+    return np.arange(1, n_max + 1, dtype=float) * k_min
+
+
+def power_spectrum_lomb_raw(
+    velocity: np.ndarray,
+    delta_f: np.ndarray,
+    dv_native: float,
+    velocity_length: float,
+) -> dict[str, np.ndarray]:
+    """Calculate the unweighted Lomb-Scargle periodogram on an angular-k grid."""
+    velocity = np.asarray(velocity, dtype=float)
+    delta_f = np.asarray(delta_f, dtype=float)
+    valid = np.isfinite(velocity) & np.isfinite(delta_f)
+    velocity = velocity[valid]
+    delta_f = delta_f[valid]
+
+    if velocity.size < 10:
+        return {"k": np.array([], dtype=float), "pk": np.array([], dtype=float)}
+    if np.any(np.diff(velocity) <= 0):
+        raise ValueError("Lomb–Scargle velocity coordinates must be increasing.")
+
+    k = compute_k_ls(velocity_length, dv_native)
+    if k.size == 0:
+        return {"k": k, "pk": np.array([], dtype=float)}
+
+    frequency = k / (2.0 * np.pi)  # cycles per km/s; k is angular wavenumber
+    periodogram = LombScargle(
+        velocity,
+        delta_f,
+        normalization="psd",
+        fit_mean=True,
+        center_data=True,
+    )
+    pk = np.asarray(periodogram.power(frequency), dtype=float) * dv_native
+    return {"k": k, "pk": pk}
+
+
+def estimate_noise_high_k(
+    raw_ps: dict[str, np.ndarray],
+    logk_noise_min: float = -0.2,
+) -> dict[str, Any]:
+    """Estimate a constant white-noise floor from the mean high-k raw power.
+
+    This reproduces the approximation used in the supplied scripts. If fewer
+    than two high-k modes are available, the noise estimate is NaN rather than
+    silently treating an unmeasured noise floor as zero.
+    """
+    k = np.asarray(raw_ps["k"], dtype=float)
+    pk = np.asarray(raw_ps["pk"], dtype=float)
+    valid = np.isfinite(k) & (k > 0) & np.isfinite(pk)
+    high_k_mask = valid & (np.log10(k) >= logk_noise_min)
+
+    if np.sum(high_k_mask) < 2:
+        p_noise = float("nan")
+    else:
+        p_noise = float(np.mean(pk[high_k_mask]))
+
+    noise_pk = np.full(pk.shape, p_noise, dtype=float)
+    return {
+        "k": k,
+        "pk": noise_pk,
+        "P_noise": p_noise,
+        "high_k_mask": high_k_mask,
+        "n_high_k": int(np.sum(high_k_mask)),
+        "logk_noise_min": float(logk_noise_min),
+    }
+
+
+def _empty_binned(k_bin: np.ndarray) -> dict[str, np.ndarray]:
+    return {
+        "k_bin": np.asarray(k_bin, dtype=float),
+        "pk_bin": np.full(len(k_bin), np.nan, dtype=float),
+        "pk_err": np.full(len(k_bin), np.nan, dtype=float),
+        "n_modes": np.zeros(len(k_bin), dtype=int),
+    }
+
+
+def lya_power_spectrum_lomb(
+    wave_obs: np.ndarray,
+    flux: np.ndarray,
+    error: np.ndarray,
+    quasar_z: float,
+    dv_native: float,
+    window_cMpc: float,
+    segment_length: float,
+    k_bin_edges: np.ndarray,
+    logk_noise_min: float = -0.2,
+) -> dict[str, Any] | None:
+    """Run the Lyα forest Lomb–Scargle analysis and retain signed binned power."""
+    forest = extract_lya_forest(wave_obs, flux, error, quasar_z)
+    if len(forest["flux"]) < 10:
+        return None
+
+    wave_obs_forest = forest["wave_obs"]
+    wave_rest = forest["wave_rest"]
+    flux_forest = forest["flux"]
+    error_forest = forest["error"]
+
+    chi_forest = comoving_coordinate(wave_obs_forest)
+    velocity, dv = velocity_grid(wave_rest, dv_native)
+    smooth = rolling_mean_flux(flux_forest, chi_forest, window_cMpc)
+
+    delta_f = np.full_like(flux_forest, np.nan, dtype=float)
+    usable_smooth = np.isfinite(smooth) & (smooth != 0)
+    delta_f[usable_smooth] = flux_forest[usable_smooth] / smooth[usable_smooth] - 1.0
+
+    good = (
+        np.isfinite(flux_forest)
+        & np.isfinite(error_forest)
+        & (error_forest > 0)
+        & np.isfinite(smooth)
+        & (smooth != 0)
+        & np.isfinite(delta_f)
+    )
+    if np.sum(good) < 10:
+        return None
+
+    segment_indices = split_into_segments(chi_forest, segment_length)
+    segment_ps: list[dict[str, Any]] = []
+
+    for segment_number, indices in enumerate(segment_indices, start=1):
+        segment_good = good[indices]
+        if np.sum(segment_good) < 10:
+            continue
+
+        velocity_section = velocity[indices]
+        if velocity_section.size < 2:
+            continue
+        velocity_length = float(velocity_section[-1] - velocity_section[0] + dv)
+        if velocity_length <= 0:
+            continue
+
+        segment_velocity = velocity_section[segment_good]
+        segment_delta_f = delta_f[indices][segment_good]
+
+        raw_ps = power_spectrum_lomb_raw(
+            segment_velocity, segment_delta_f, dv, velocity_length
+        )
+        if raw_ps["k"].size == 0:
+            continue
+
+        noise_ps = estimate_noise_high_k(raw_ps, logk_noise_min)
+        corrected_pk = raw_ps["pk"] - noise_ps["pk"]
+
+        k_bin, raw_bin, raw_err, raw_modes = bin_power_spectrum_signed(
+            raw_ps["k"], raw_ps["pk"], k_bin_edges
+        )
+        _, noise_bin, noise_err, noise_modes = bin_power_spectrum_signed(
+            raw_ps["k"], noise_ps["pk"], k_bin_edges
+        )
+        _, corrected_bin, corrected_err, corrected_modes = bin_power_spectrum_signed(
+            raw_ps["k"], corrected_pk, k_bin_edges
         )
 
-        fig_segments.add_trace(go.Scatter(
-            x=np.log10(k[valid]),
-            y=np.log10(k[valid] * pk[valid] / np.pi),
-            mode="lines",
-            name=(
-                f"{seg['quasar']} — "
-                f"segment {seg['segment_number']}"
-            ),
-            line=dict(width=1),
-            opacity=0.35,
-            showlegend=True,
-        ))
+        segment_wave_center = float(np.mean(wave_obs_forest[indices]))
+        segment_z = segment_wave_center / LYA_REST_WAVELENGTH - 1.0
 
-    # Final mean spectrum for this redshift bin
-    k = result["k_bin"]
-    pk = result["pk_bin"]
-    err = result["pk_err"]
+        segment_ps.append({
+            "segment_number": segment_number,
+            "z": segment_z,
+            "k_bin": k_bin,
+            # Final noise-subtracted science values: signed and not clipped.
+            "pk_bin": corrected_bin,
+            "pk_err": corrected_err,
+            "n_modes": corrected_modes,
+            # Separate diagnostic stages, all in linear power units.
+            "pk_raw_bin": raw_bin,
+            "pk_raw_err": raw_err,
+            "n_raw_modes": raw_modes,
+            "pk_noise_bin": noise_bin,
+            "pk_noise_err": noise_err,
+            "n_noise_modes": noise_modes,
+            "pk_sub_bin": corrected_bin.copy(),
+            "pk_sub_err": corrected_err.copy(),
+            "n_sub_modes": corrected_modes.copy(),
+            "P_noise": noise_ps["P_noise"],
+            "n_high_k": noise_ps["n_high_k"],
+            "logk_noise_min": noise_ps["logk_noise_min"],
+            "noise_valid": bool(np.isfinite(noise_ps["P_noise"])),
+        })
 
-    valid = (
-        np.isfinite(k)
-        & np.isfinite(pk)
-        & (k > 0)
-        & (pk > 0)
+    if not segment_ps:
+        return None
+
+    # Per-quasar mean: equal-weight average of its accepted segments.
+    average_ps = average_segment_power_spectra(segment_ps)
+    if average_ps is None:
+        return None
+
+    # Full-forest diagnostic. This is not the combined science measurement.
+    full_velocity_length = float(velocity[-1] - velocity[0] + dv)
+    raw_full = power_spectrum_lomb_raw(
+        velocity[good], delta_f[good], dv, full_velocity_length
     )
+    if raw_full["k"].size:
+        noise_full = estimate_noise_high_k(raw_full, logk_noise_min)
+        corrected_full = raw_full["pk"] - noise_full["pk"]
+        k_full_bin, raw_full_bin, raw_full_err, raw_full_modes = bin_power_spectrum_signed(
+            raw_full["k"], raw_full["pk"], k_bin_edges
+        )
+        _, noise_full_bin, _, _ = bin_power_spectrum_signed(
+            raw_full["k"], noise_full["pk"], k_bin_edges
+        )
+        _, corrected_full_bin, corrected_full_err, corrected_full_modes = bin_power_spectrum_signed(
+            raw_full["k"], corrected_full, k_bin_edges
+        )
+    else:
+        noise_full = {"pk": np.array([], dtype=float), "P_noise": np.nan, "n_high_k": 0}
+        k_full_bin = 10.0 ** (0.5 * (k_bin_edges[:-1] + k_bin_edges[1:]))
+        raw_full_bin = np.full_like(k_full_bin, np.nan)
+        raw_full_err = np.full_like(k_full_bin, np.nan)
+        raw_full_modes = np.zeros_like(k_full_bin, dtype=int)
+        noise_full_bin = np.full_like(k_full_bin, np.nan)
+        corrected_full_bin = np.full_like(k_full_bin, np.nan)
+        corrected_full_err = np.full_like(k_full_bin, np.nan)
+        corrected_full_modes = np.zeros_like(k_full_bin, dtype=int)
+        raw_full = {"k": np.array([], dtype=float), "pk": np.array([], dtype=float)}
+        corrected_full = np.array([], dtype=float)
 
-    mean_err = np.where(
-        np.isfinite(err[valid]) & (err[valid] >= 0),
-        err[valid] / (pk[valid] * np.log(10)),
-        np.nan,
-    )
+    return {
+        "wave_obs": wave_obs_forest,
+        "wave_rest": wave_rest,
+        "flux_forest": flux_forest,
+        "error_forest": error_forest,
+        "smooth": smooth,
+        "deltaF": delta_f,
+        "chi_forest": chi_forest,
+        "velocity": velocity,
+        "dv_forest": dv,
+        "n_good": int(np.sum(good)),
+        "n_forest_pixels": int(len(flux_forest)),
+        "window_cMpc": float(window_cMpc),
+        "segment_length": float(segment_length),
+        "segment_ps": segment_ps,
+        # Per-quasar average of accepted segments, retaining signed values.
+        "k_bin": average_ps["k_bin"],
+        "pk_bin": average_ps["pk_bin"],
+        "pk_err": average_ps["pk_err"],
+        "n_modes": average_ps["n_modes"],
+        "n_segments_per_bin": average_ps["n_segments"],
+        # Full-forest diagnostics.
+        "k_full": raw_full["k"],
+        "pk_full_raw": raw_full["pk"],
+        "pk_full_noise": noise_full["pk"],
+        "pk_full_corrected": corrected_full,
+        "P_noise_full": noise_full["P_noise"],
+        "n_high_k_full": noise_full["n_high_k"],
+        "k_full_bin": k_full_bin,
+        "pk_full_raw_bin": raw_full_bin,
+        "pk_full_raw_err_bin": raw_full_err,
+        "pk_full_noise_bin": noise_full_bin,
+        "pk_full_corrected_bin": corrected_full_bin,
+        "pk_full_corrected_err_bin": corrected_full_err,
+        "n_full_modes": corrected_full_modes,
+    }
 
-    fig_segments.add_trace(go.Scatter(
+
+# -----------------------------------------------------------------------------
+# SECTION 6: PLOTTING UTILITIES
+# -----------------------------------------------------------------------------
+
+
+def plotly_download_config(filename: str) -> dict[str, Any]:
+    safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in filename)
+    return {
+        "toImageButtonOptions": {
+            "format": "png",
+            "filename": safe_name,
+            "height": 800,
+            "width": 1200,
+            "scale": 2,
+        }
+    }
+
+
+def signed_y_values(k: np.ndarray, pk: np.ndarray) -> np.ndarray:
+    """Return signed dimensionless plotting quantity kP(k)/pi."""
+    return np.asarray(k, dtype=float) * np.asarray(pk, dtype=float) / np.pi
+
+
+def add_signed_trace(
+    fig: go.Figure,
+    k: np.ndarray,
+    pk: np.ndarray,
+    name: str,
+    error: np.ndarray | None = None,
+    mode: str = "lines+markers",
+    opacity: float = 1.0,
+) -> None:
+    """Add a signed linear-y trace; negative power remains visible."""
+    k = np.asarray(k, dtype=float)
+    pk = np.asarray(pk, dtype=float)
+    valid = np.isfinite(k) & (k > 0) & np.isfinite(pk)
+
+    if error is None:
+        error_y = None
+    else:
+        error = np.asarray(error, dtype=float)
+        error_y = np.full(np.sum(valid), np.nan, dtype=float)
+        if error.shape == k.shape:
+            e = error[valid]
+            error_y = np.where(np.isfinite(e) & (e >= 0), k[valid] * e / np.pi, np.nan)
+
+    fig.add_trace(go.Scatter(
         x=np.log10(k[valid]),
-        y=np.log10(k[valid] * pk[valid] / np.pi),
-        mode="lines+markers",
-        name="Redshift-bin mean",
-        line=dict(width=4, color="black"),
-        marker=dict(size=6, color="black"),
-        error_y=dict(
-            type="data",
-            array=mean_err,
-            visible=True,
+        y=signed_y_values(k[valid], pk[valid]),
+        mode=mode,
+        name=name,
+        opacity=opacity,
+        error_y=(
+            dict(type="data", array=error_y, visible=True)
+            if error_y is not None else None
         ),
     ))
 
-    fig_segments.update_layout(
-        title=(
-            f"Segment Contributions: "
-            f"{zmin:.1f} ≤ z < {zmax:.1f}"
+
+def add_positive_log_trace(
+    fig: go.Figure,
+    k: np.ndarray,
+    pk: np.ndarray,
+    name: str,
+    error: np.ndarray | None = None,
+    mode: str = "lines+markers",
+) -> None:
+    """Add only positive binned power to the conventional logarithmic plot."""
+    k = np.asarray(k, dtype=float)
+    pk = np.asarray(pk, dtype=float)
+    valid = np.isfinite(k) & (k > 0) & np.isfinite(pk) & (pk > 0)
+
+    if not np.any(valid):
+        return
+
+    error_y = None
+    if error is not None:
+        error = np.asarray(error, dtype=float)
+        if error.shape == k.shape:
+            e = error[valid]
+            error_y = np.where(
+                np.isfinite(e) & (e >= 0),
+                e / (pk[valid] * np.log(10.0)),
+                np.nan,
+            )
+
+    fig.add_trace(go.Scatter(
+        x=np.log10(k[valid]),
+        y=np.log10(k[valid] * pk[valid] / np.pi),
+        mode=mode,
+        name=name,
+        error_y=(
+            dict(type="data", array=error_y, visible=True)
+            if error_y is not None else None
         ),
-        xaxis_title="log₁₀(k / (km⁻¹ s))",
-        yaxis_title="log₁₀[kP(k) / π]",
-        legend_title="Quasar and segment",
-        height=650,
+    ))
+
+
+def make_results_table(
+    redshift_results: dict[tuple[float, float], dict[str, Any]],
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for zbin, products in redshift_results.items():
+        final = products["final"]
+        raw = products["raw"]
+        noise = products["noise"]
+        for i, k in enumerate(final["k_bin"]):
+            rows.append({
+                "z_min": zbin[0],
+                "z_max": zbin[1],
+                "log10_k": np.log10(k),
+                "k_km-1_s": k,
+                "P_raw": raw["pk_bin"][i],
+                "P_noise": noise["pk_bin"][i],
+                # This column is signed: negative values are intentionally kept.
+                "P_corrected": final["pk_bin"][i],
+                "P_corrected_error": final["pk_err"][i],
+                "n_modes": final["n_modes"][i],
+                "n_segments": final["n_segments"][i],
+            })
+    return pd.DataFrame(rows)
+
+
+# -----------------------------------------------------------------------------
+# SECTION 7: SIDEBAR SETTINGS
+# -----------------------------------------------------------------------------
+
+st.sidebar.header("Analysis settings")
+window_cMpc = st.sidebar.number_input(
+    "Rolling mean window (h⁻¹ cMpc)",
+    min_value=10.0,
+    max_value=100.0,
+    value=40.0,
+    step=5.0,
+)
+segment_length = st.sidebar.number_input(
+    "Segment length (h⁻¹ cMpc)",
+    min_value=5.0,
+    max_value=50.0,
+    value=20.0,
+    step=1.0,
+)
+logk_min = st.sidebar.number_input("Minimum log₁₀(k)", value=-2.2, step=0.1)
+logk_max = st.sidebar.number_input("Maximum log₁₀(k)", value=-0.7, step=0.1)
+delta_logk = st.sidebar.number_input("Δlog₁₀(k)", min_value=0.01, value=0.1, step=0.01)
+logk_noise_min = st.sidebar.number_input(
+    "High-k noise threshold: log₁₀(k)",
+    value=-0.2,
+    step=0.05,
+    help="The current noise model takes the mean raw power above this threshold as a constant noise floor.",
+)
+
+try:
+    K_BIN_CENTERS, K_BIN_EDGES = make_log_k_bins(logk_min, logk_max, delta_logk)
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+
+
+# -----------------------------------------------------------------------------
+# SECTION 8: LOAD SPECTRA AND RUN EACH QUASAR
+# -----------------------------------------------------------------------------
+
+st.title("Combined Lyα Forest Power Spectrum")
+st.markdown(
+    "The final combined measurement is an equal-weight mean of accepted "
+    "comoving segments within each absorber-redshift bin. All power averaging "
+    "is performed in linear units, and negative noise-subtracted values are retained."
+)
+
+pairs = find_flux_error_pairs(SPEC_DIR)
+if not pairs:
+    st.error(
+        f"No matching *_flux.fits / *_error.fits pairs were found in '{SPEC_DIR}'. "
+        "Create the folder and place the spectra there."
     )
+    st.stop()
 
-    st.plotly_chart(fig_segments, width="stretch")
+spectra: list[dict[str, Any]] = []
+summary_rows: list[dict[str, Any]] = []
+load_errors: list[dict[str, str]] = []
+
+progress = st.progress(0.0, text="Loading spectra and calculating power spectra...")
+for pair_index, (key, files) in enumerate(sorted(pairs.items()), start=1):
+    try:
+        if key not in REDSHIFTS:
+            raise KeyError(f"No quasar redshift is defined for file key '{key}'.")
+
+        flux, flux_header = load_fits_1d(files["flux"])
+        error, _ = load_fits_1d(files["error"])
+        if flux.shape != error.shape:
+            raise ValueError(
+                f"Flux and error arrays have different lengths: {len(flux)} vs {len(error)}."
+            )
+
+        wave = wavelength_array(flux_header, len(flux))
+        # Ensure all wavelength-dependent arrays are in increasing wavelength.
+        order = np.argsort(wave)
+        wave = wave[order]
+        flux = flux[order]
+        error = error[order]
+
+        quasar_z = float(REDSHIFTS[key])
+        dv_native = native_velocity_spacing(flux_header)
+        snr, median_snr, masked_fraction = snr_calculations(flux, error)
+        chi_full = comoving_coordinate(wave)
+        pixel_spacing = mean_pixel_spacing(chi_full)
+
+        ps_lomb = lya_power_spectrum_lomb(
+            wave_obs=wave,
+            flux=flux,
+            error=error,
+            quasar_z=quasar_z,
+            dv_native=dv_native,
+            window_cMpc=window_cMpc,
+            segment_length=segment_length,
+            k_bin_edges=K_BIN_EDGES,
+            logk_noise_min=logk_noise_min,
+        )
+
+        object_name = str(flux_header.get("OBJECT", key))
+        instrument = str(flux_header.get("INSTRUME", "Unknown"))
+        spectrum_record = {
+            "key": key,
+            "object": object_name,
+            "z": quasar_z,
+            "instrument": instrument,
+            "wave": wave,
+            "flux": flux,
+            "error": error,
+            "snr": snr,
+            "median_snr": median_snr,
+            "masked_fraction": masked_fraction,
+            "dv_native": dv_native,
+            "chi": chi_full,
+            "pixel_spacing": pixel_spacing,
+            "window_cMpc": float(window_cMpc),
+            "segment_length": float(segment_length),
+            "ps_lomb": ps_lomb,
+        }
+        spectra.append(spectrum_record)
+
+        if ps_lomb is None:
+            n_forest = 0
+            n_good = 0
+            n_segments = 0
+            noise_valid_segments = 0
+        else:
+            n_forest = ps_lomb["n_forest_pixels"]
+            n_good = ps_lomb["n_good"]
+            n_segments = len(ps_lomb["segment_ps"])
+            noise_valid_segments = sum(seg["noise_valid"] for seg in ps_lomb["segment_ps"])
+
+        summary_rows.append({
+            "Object": object_name,
+            "File key": key,
+            "Quasar z": quasar_z,
+            "Instrument": instrument,
+            "Pixels": len(flux),
+            "Wavelength min (Å)": float(np.min(wave)),
+            "Wavelength max (Å)": float(np.max(wave)),
+            "Median S/N": median_snr,
+            "Unusable pixels (%)": masked_fraction,
+            "Native dv (km/s)": dv_native,
+            "Median pixel spacing (h⁻¹ cMpc)": pixel_spacing,
+            "Forest pixels used": n_forest,
+            "Good normalized pixels": n_good,
+            "Accepted segments": n_segments,
+            "Segments with noise estimate": noise_valid_segments,
+        })
+
+    except Exception as exc:
+        load_errors.append({"File key": key, "Error": str(exc)})
+
+    progress.progress(pair_index / len(pairs), text=f"Processed {pair_index}/{len(pairs)} spectra")
+progress.empty()
+
+if not spectra:
+    st.error("No spectra could be processed. See the loading errors below.")
+    if load_errors:
+        st.dataframe(pd.DataFrame(load_errors), width="stretch")
+    st.stop()
 
 
+# -----------------------------------------------------------------------------
+# SECTION 9: COMBINE SEGMENTS FROM ALL QUASARS
+# -----------------------------------------------------------------------------
 
+all_segments: list[dict[str, Any]] = []
+for spec in spectra:
+    ps_lomb = spec["ps_lomb"]
+    if ps_lomb is None:
+        continue
+    for segment in ps_lomb["segment_ps"]:
+        segment_record = dict(segment)
+        segment_record["quasar"] = spec["object"]
+        segment_record["quasar_key"] = spec["key"]
+        all_segments.append(segment_record)
+
+grouped_segments = group_segments_by_redshift(all_segments, REDSHIFT_BINS)
+
+redshift_results: dict[tuple[float, float], dict[str, Any]] = {}
+for zbin, segments in grouped_segments.items():
+    if not segments:
+        continue
+    redshift_results[zbin] = {
+        "final": average_segment_power_spectra(
+            segments, power_key="pk_bin", error_key="pk_err", modes_key="n_modes"
+        ),
+        "raw": average_segment_power_spectra(
+            segments, power_key="pk_raw_bin", error_key="pk_raw_err", modes_key="n_raw_modes"
+        ),
+        "noise": average_segment_power_spectra(
+            segments, power_key="pk_noise_bin", error_key="pk_noise_err", modes_key="n_noise_modes"
+        ),
+        "segments": segments,
+    }
+
+
+# -----------------------------------------------------------------------------
+# SECTION 10: DATASET AND COMBINATION SUMMARY
+# -----------------------------------------------------------------------------
+
+st.header("Dataset summary")
+summary_df = pd.DataFrame(summary_rows)
+st.dataframe(summary_df, width="stretch", hide_index=True)
+
+if load_errors:
+    with st.expander(f"Files not processed ({len(load_errors)})", expanded=False):
+        st.dataframe(pd.DataFrame(load_errors), width="stretch", hide_index=True)
+
+segment_summary_rows = []
+for zbin, segments in grouped_segments.items():
+    segment_summary_rows.append({
+        "Absorber redshift bin": f"{zbin[0]:.1f} ≤ z < {zbin[1]:.1f}",
+        "Segments": len(segments),
+        "Distinct quasars": len({seg["quasar_key"] for seg in segments}),
+        "Segments with noise estimate": sum(bool(seg["noise_valid"]) for seg in segments),
+    })
+st.subheader("Segments contributing to each redshift bin")
+st.dataframe(pd.DataFrame(segment_summary_rows), width="stretch", hide_index=True)
+
+
+# -----------------------------------------------------------------------------
+# SECTION 11: FINAL ALL-QUASAR POWER SPECTRUM
+# -----------------------------------------------------------------------------
+
+st.header("Final combined power spectrum by absorber redshift")
+st.caption(
+    "Signed linear-power plot: all finite noise-subtracted measurements are included, "
+    "including negative values. The y-axis is kP(k)/π in linear units."
+)
+
+fig_signed = go.Figure()
+for (z_min, z_max), products in redshift_results.items():
+    final = products["final"]
+    add_signed_trace(
+        fig_signed,
+        final["k_bin"],
+        final["pk_bin"],
+        name=f"{z_min:.1f} ≤ z < {z_max:.1f}",
+        error=final["pk_err"],
+    )
+fig_signed.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.7)
+fig_signed.update_layout(
+    title="Combined Lyα forest power spectrum (signed)",
+    xaxis_title="log₁₀(k / (km s⁻¹)⁻¹)",
+    yaxis_title="kP(k) / π (linear; signed)",
+    hovermode="x unified",
+    legend_title="Absorber redshift",
+)
+st.plotly_chart(fig_signed, width="stretch")
+
+with st.expander("Conventional logarithmic presentation (positive bins only)", expanded=False):
+    st.caption(
+        "This is a presentation-only view. Non-positive binned powers are omitted "
+        "because they cannot be represented on a logarithmic y-axis; they remain "
+        "in the signed plot, result table, and CSV export above/below."
+    )
+    fig_log = go.Figure()
+    for (z_min, z_max), products in redshift_results.items():
+        final = products["final"]
+        add_positive_log_trace(
+            fig_log,
+            final["k_bin"],
+            final["pk_bin"],
+            name=f"{z_min:.1f} ≤ z < {z_max:.1f}",
+            error=final["pk_err"],
+        )
+    fig_log.update_layout(
+        title="Combined Lyα forest power spectrum (positive bins only)",
+        xaxis_title="log₁₀(k / (km s⁻¹)⁻¹)",
+        yaxis_title="log₁₀[kP(k) / π]",
+        hovermode="x unified",
+        legend_title="Absorber redshift",
+    )
+    st.plotly_chart(fig_log, width="stretch")
+
+with st.expander("Raw, noise, and noise-subtracted comparison", expanded=False):
+    fig_stages = go.Figure()
+    for (z_min, z_max), products in redshift_results.items():
+        raw = products["raw"]
+        noise = products["noise"]
+        final = products["final"]
+        suffix = f"({z_min:.1f}–{z_max:.1f})"
+        add_signed_trace(fig_stages, raw["k_bin"], raw["pk_bin"], f"Raw {suffix}", mode="lines")
+        add_signed_trace(fig_stages, noise["k_bin"], noise["pk_bin"], f"Noise {suffix}", mode="lines")
+        add_signed_trace(fig_stages, final["k_bin"], final["pk_bin"], f"Corrected {suffix}", error=final["pk_err"])
+    fig_stages.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.7)
+    fig_stages.update_layout(
+        title="Mean raw, estimated noise, and corrected power",
+        xaxis_title="log₁₀(k / (km s⁻¹)⁻¹)",
+        yaxis_title="kP(k) / π (linear; signed)",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_stages, width="stretch")
+
+
+# -----------------------------------------------------------------------------
+# SECTION 12: REDSHIFT-BIN SEGMENT CONTRIBUTIONS
+# -----------------------------------------------------------------------------
+
+with st.expander("Individual segment contributions to each redshift bin", expanded=False):
+    for (z_min, z_max), products in redshift_results.items():
+        segments = products["segments"]
+        st.subheader(f"{z_min:.1f} ≤ z < {z_max:.1f}  |  {len(segments)} segments")
+
+        fig_seg = go.Figure()
+        for seg in segments:
+            add_signed_trace(
+                fig_seg,
+                seg["k_bin"],
+                seg["pk_bin"],
+                name=f"{seg['quasar']} — segment {seg['segment_number']}",
+                mode="lines",
+                opacity=0.3,
+            )
+        final = products["final"]
+        add_signed_trace(
+            fig_seg,
+            final["k_bin"],
+            final["pk_bin"],
+            name="Redshift-bin mean",
+            error=final["pk_err"],
+            mode="lines+markers",
+        )
+        fig_seg.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.7)
+        fig_seg.update_layout(
+            title=f"Signed segment power: {z_min:.1f} ≤ z < {z_max:.1f}",
+            xaxis_title="log₁₀(k / (km s⁻¹)⁻¹)",
+            yaxis_title="kP(k) / π (linear; signed)",
+            hovermode="closest",
+            legend_title="Quasar and segment",
+            height=650,
+        )
+        st.plotly_chart(fig_seg, width="stretch")
+
+
+# -----------------------------------------------------------------------------
+# SECTION 13: INDIVIDUAL QUASAR INSPECTION
+# -----------------------------------------------------------------------------
+
+st.header("Individual quasar diagnostics")
+selectable_spectra = [
+    i for i, spec in enumerate(spectra) if spec["ps_lomb"] is not None
+]
+if not selectable_spectra:
+    st.info("No quasar has enough usable Lyα forest pixels and accepted segments.")
+else:
+    label_to_index = {
+        f"{spectra[i]['object']}  (z={spectra[i]['z']:.3f}; {spectra[i]['instrument']})": i
+        for i in selectable_spectra
+    }
+    selected_label = st.selectbox("Select a quasar", list(label_to_index.keys()))
+    spec = spectra[label_to_index[selected_label]]
+    ps_lomb = spec["ps_lomb"]
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Quasar redshift", f"{spec['z']:.3f}")
+    metric_cols[1].metric("Median S/N", f"{spec['median_snr']:.2f}" if np.isfinite(spec["median_snr"]) else "N/A")
+    metric_cols[2].metric("Unusable pixels", f"{spec['masked_fraction']:.1f}%")
+    metric_cols[3].metric("Accepted segments", str(len(ps_lomb["segment_ps"])))
+    metric_cols[4].metric("Good forest pixels", str(ps_lomb["n_good"]))
+
+    with st.expander("Forest flux, rolling mean, and flux contrast", expanded=False):
+        fig_flux = go.Figure()
+        fig_flux.add_trace(go.Scatter(
+            x=ps_lomb["wave_obs"], y=ps_lomb["flux_forest"],
+            mode="lines", name="Forest flux", line=dict(width=1),
+        ))
+        fig_flux.add_trace(go.Scatter(
+            x=ps_lomb["wave_obs"], y=ps_lomb["smooth"],
+            mode="lines", name=f"Rolling mean ({window_cMpc:.0f} h⁻¹ cMpc)",
+            line=dict(width=2),
+        ))
+        fig_flux.update_layout(
+            title=f"{spec['object']}: Lyα forest flux and rolling mean",
+            xaxis_title="Observed wavelength (Å)",
+            yaxis_title="Flux",
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_flux, width="stretch")
+
+        fig_delta = go.Figure()
+        fig_delta.add_trace(go.Scatter(
+            x=ps_lomb["wave_obs"], y=ps_lomb["deltaF"],
+            mode="lines", name="δF", line=dict(width=1),
+        ))
+        fig_delta.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig_delta.update_layout(
+            title=f"{spec['object']}: rolling-mean normalized flux contrast",
+            xaxis_title="Observed wavelength (Å)",
+            yaxis_title="δF",
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_delta, width="stretch")
+
+    with st.expander("Per-quasar signed and logarithmic power spectra", expanded=True):
+        fig_qso_signed = go.Figure()
+        add_signed_trace(
+            fig_qso_signed,
+            ps_lomb["k_bin"],
+            ps_lomb["pk_bin"],
+            "Mean of this quasar's segments",
+            error=ps_lomb["pk_err"],
+        )
+        fig_qso_signed.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig_qso_signed.update_layout(
+            title=f"{spec['object']}: signed segment-averaged power",
+            xaxis_title="log₁₀(k / (km s⁻¹)⁻¹)",
+            yaxis_title="kP(k) / π (linear; signed)",
+        )
+        st.plotly_chart(fig_qso_signed, width="stretch")
+
+        fig_qso_log = go.Figure()
+        add_positive_log_trace(
+            fig_qso_log,
+            ps_lomb["k_bin"],
+            ps_lomb["pk_bin"],
+            "Positive bins only",
+            error=ps_lomb["pk_err"],
+        )
+        fig_qso_log.update_layout(
+            title=f"{spec['object']}: positive bins on logarithmic scale",
+            xaxis_title="log₁₀(k / (km s⁻¹)⁻¹)",
+            yaxis_title="log₁₀[kP(k) / π]",
+        )
+        st.plotly_chart(fig_qso_log, width="stretch")
+
+    with st.expander("Segment noise estimates and signed binned powers", expanded=False):
+        qso_segment_rows = []
+        for seg in ps_lomb["segment_ps"]:
+            qso_segment_rows.append({
+                "Segment": seg["segment_number"],
+                "Absorber z": seg["z"],
+                "Noise estimate valid": seg["noise_valid"],
+                "P_noise": seg["P_noise"],
+                "High-k modes used": seg["n_high_k"],
+                "Negative corrected bins": int(np.sum(np.isfinite(seg["pk_bin"]) & (seg["pk_bin"] < 0))),
+                "Finite corrected bins": int(np.sum(np.isfinite(seg["pk_bin"]))),
+            })
+        st.dataframe(pd.DataFrame(qso_segment_rows), width="stretch", hide_index=True)
+
+        fig_qso_segments = go.Figure()
+        for seg in ps_lomb["segment_ps"]:
+            add_signed_trace(
+                fig_qso_segments,
+                seg["k_bin"],
+                seg["pk_bin"],
+                name=f"Segment {seg['segment_number']}",
+                mode="lines+markers",
+                opacity=0.7,
+            )
+        fig_qso_segments.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig_qso_segments.update_layout(
+            title=f"{spec['object']}: signed power spectrum for each segment",
+            xaxis_title="log₁₀(k / (km s⁻¹)⁻¹)",
+            yaxis_title="kP(k) / π (linear; signed)",
+            hovermode="closest",
+        )
+        st.plotly_chart(fig_qso_segments, width="stretch")
+
+
+# -----------------------------------------------------------------------------
+# SECTION 14: EXPORTS
+# -----------------------------------------------------------------------------
+
+st.header("Download results")
+
+combined_df = make_results_table(redshift_results)
+st.subheader("Combined signed power-spectrum table")
+st.caption("P_corrected is in linear units and includes negative values.")
+st.dataframe(combined_df, width="stretch", hide_index=True)
+
+csv_bytes = combined_df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    label="Download combined signed power spectrum (CSV)",
+    data=csv_bytes,
+    file_name="combined_lya_power_spectrum_signed.csv",
+    mime="text/csv",
+)
+
+spectra_bytes = pickle.dumps(
+    {
+        "spectra": spectra,
+        "all_segments": all_segments,
+        "grouped_segments": grouped_segments,
+        "redshift_results": redshift_results,
+        "k_bin_centers": K_BIN_CENTERS,
+        "k_bin_edges": K_BIN_EDGES,
+        "settings": {
+            "window_cMpc": window_cMpc,
+            "segment_length": segment_length,
+            "logk_noise_min": logk_noise_min,
+            "redshift_bins": REDSHIFT_BINS,
+        },
+    },
+    protocol=pickle.HIGHEST_PROTOCOL,
+)
+st.download_button(
+    label="Download full analysis data (pickle)",
+    data=spectra_bytes,
+    file_name="lya_power_spectrum_full_analysis.pkl",
+    mime="application/octet-stream",
+)
+
+st.caption(
+    "Method note: the code preserves signed noise-subtracted values, but the "
+    "constant high-k noise-floor model and unweighted Lomb–Scargle normalization "
+    "are inherited methodological assumptions from the supplied scripts. "
+    "Validate these assumptions before using the result as a final publication measurement."
+)
