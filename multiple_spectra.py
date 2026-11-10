@@ -304,29 +304,28 @@ def power_spectrum_lomb_raw(velocity, deltaF, dv, L_velocity):
      #   "pk": np.mean(noise_pk, axis=0)}
 
 def estimate_noise_high_k(raw_ps, logk_noise_min=-0.2):
-
     k = raw_ps["k"]
     pk = raw_ps["pk"]
 
-    valid = (np.isfinite(k) & np.isfinite(pk) & (k > 0))
-
+    valid = np.isfinite(k) & np.isfinite(pk) & (k > 0)
     high_k = valid & (np.log10(k) >= logk_noise_min)
 
     if np.sum(high_k) < 2:
-        return {
-            "k": k,
-            "pk": np.full_like(pk, np.nan, dtype=float)}
+        P_noise = np.nan
+    else:
+        # Current approximation: constant noise floor from the mean high-k power.
+        P_noise = float(np.mean(pk[high_k]))
 
-    # Fit a constant noise level using the mean high-k power
-    P_noise = np.mean(pk[high_k])
-
-    # Assume white noise: same noise power at every k
     noise_pk = np.full_like(pk, P_noise, dtype=float)
 
     return {
         "k": k,
         "pk": noise_pk,
-        "P_noise": P_noise}
+        "P_noise": P_noise,
+        "high_k_mask": high_k,
+        "n_high_k": int(np.sum(high_k)),
+        "logk_noise_min": float(logk_noise_min),
+    }
 
 # ----- Step 5 : Assemble the complete Lyα Lomb–Scargle pipeline
 def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_length):
@@ -375,11 +374,20 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
 
         #noise_ps_seg = estimate_noise_periodogram(velocity_seg,error_seg,smooth_seg,dv_forest,L_velocity)
         noise_ps_seg = estimate_noise_high_k(raw_ps_seg)
+        pk_corrected = raw_ps_seg["pk"] - noise_ps_seg["pk"]
 
+        # Binned diagnostic stages. Keep signed values after noise subtraction.
+        k_debug, pk_raw_bin, pk_raw_err, n_raw_modes = bin_power_for_debug(
+            raw_ps_seg["k"], raw_ps_seg["pk"])
+        _, pk_noise_bin, _, n_noise_modes = bin_power_for_debug(
+            raw_ps_seg["k"], noise_ps_seg["pk"])
+        _, pk_sub_bin, pk_sub_err, n_sub_modes = bin_power_for_debug(
+            raw_ps_seg["k"], pk_corrected)
 
-        
-        pk_corrected = (raw_ps_seg["pk"]- noise_ps_seg["pk"])
-        k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(raw_ps_seg["k"],pk_corrected)
+        # Science spectrum retains the existing positive-power binning.
+        k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(
+            raw_ps_seg["k"], pk_corrected)
+
         wave_center = np.mean(wave_obs_forest[indices])
         segment_z = wave_center / 1215.67 - 1.0
         segment_ps.append({
@@ -387,7 +395,21 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
             "k_bin": k_bin,
             "pk_bin": pk_bin,
             "pk_err": pk_err,
-            "n_modes": n_modes})
+            "n_modes": n_modes,
+            # Diagnostic arrays, all binned on the same science k bins:
+            "k_debug_bin": k_debug,
+            "pk_raw_bin": pk_raw_bin,
+            "pk_raw_err_bin": pk_raw_err,
+            "pk_noise_bin": pk_noise_bin,
+            "pk_sub_bin": pk_sub_bin,
+            "pk_sub_err_bin": pk_sub_err,
+            "n_raw_modes": n_raw_modes,
+            "n_noise_modes": n_noise_modes,
+            "n_sub_modes": n_sub_modes,
+            "P_noise": noise_ps_seg["P_noise"],
+            "n_high_k": noise_ps_seg["n_high_k"],
+            "logk_noise_min": noise_ps_seg["logk_noise_min"],
+        })
 
     average_ps = average_segment_power_spectra(segment_ps)
 
@@ -402,8 +424,16 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
     noise_ps= estimate_noise_high_k(raw_ps)
     pk_corrected = raw_ps["pk"] - noise_ps["pk"]
 
-    # Optional: useful for diagnostic plots
-    k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(raw_ps["k"],pk_corrected)
+    # Binned full-forest diagnostic stages (not used as the science result).
+    k_debug, pk_raw_bin, pk_raw_err_bin, n_raw_modes = bin_power_for_debug(
+        raw_ps["k"], raw_ps["pk"])
+    _, pk_noise_bin, _, n_noise_modes = bin_power_for_debug(
+        raw_ps["k"], noise_ps["pk"])
+    _, pk_sub_bin, pk_sub_err_bin, n_sub_modes = bin_power_for_debug(
+        raw_ps["k"], pk_corrected)
+
+    k_bin, pk_bin, pk_err, n_modes = bin_power_spectrum(
+        raw_ps["k"], pk_corrected)
 
     return {
         "wave_obs": wave_obs_forest,
@@ -423,6 +453,18 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
         "pk": raw_ps["pk"],
         "noise_pk": noise_ps["pk"],
         "pk_corrected": pk_corrected,
+        "P_noise": noise_ps["P_noise"],
+        "n_high_k": noise_ps["n_high_k"],
+        "logk_noise_min": noise_ps["logk_noise_min"],
+        "k_debug_bin": k_debug,
+        "pk_raw_bin": pk_raw_bin,
+        "pk_raw_err_bin": pk_raw_err_bin,
+        "pk_noise_bin": pk_noise_bin,
+        "pk_sub_bin": pk_sub_bin,
+        "pk_sub_err_bin": pk_sub_err_bin,
+        "n_raw_modes": n_raw_modes,
+        "n_noise_modes": n_noise_modes,
+        "n_sub_modes": n_sub_modes,
 
         # Individual corrected segment spectra
         "segment_ps": segment_ps,
@@ -432,6 +474,7 @@ def lya_power_spectrum_lomb(wave_obs, flux, error, z, window_cMpc, segment_lengt
         "pk_bin": average_ps["pk_bin"],
         "pk_err": average_ps["pk_err"],
     }
+
 
 # SECTION 2.5 : COMOVING-SPACE UTILITIES
 
@@ -540,6 +583,47 @@ def group_segments_by_redshift(all_segments, redshift_bins):
 # 2.6.1 Plot download configuration
 def plotly_download_config(quasar_name,graph_name):
     return {"toImageButtonOptions": {"format": "png","filename":f"{quasar_name}_{graph_name}","height": 800,"width": 1200,"scale": 2}}
+
+# SECTION 2.7 : THE PLOTS STUFF 
+
+def bin_power_for_debug(k, pk):
+    """
+    Bin power in linear units while retaining negative noise-subtracted values.
+    This is for diagnostics; the existing science binning function is unchanged.
+    """
+    k = np.asarray(k, dtype=float)
+    pk = np.asarray(pk, dtype=float)
+    n_bins = len(K_BIN_EDGES) - 1
+
+    k_bin = 10 ** (0.5 * (K_BIN_EDGES[:-1] + K_BIN_EDGES[1:]))
+    pk_bin = np.full(n_bins, np.nan)
+    pk_err = np.full(n_bins, np.nan)
+    n_modes = np.zeros(n_bins, dtype=int)
+
+    valid_k = np.isfinite(k) & (k > 0)
+    logk = np.full(k.shape, np.nan)
+    logk[valid_k] = np.log10(k[valid_k])
+
+    for i in range(n_bins):
+        m = (
+            valid_k
+            & np.isfinite(pk)
+            & (logk >= K_BIN_EDGES[i])
+            & (logk < K_BIN_EDGES[i + 1])
+        )
+        values = pk[m]
+        n_modes[i] = values.size
+
+        if values.size == 0:
+            continue
+
+        pk_bin[i] = np.mean(values)
+        if values.size > 1:
+            pk_err[i] = np.std(values, ddof=1) / np.sqrt(values.size)
+
+    return k_bin, pk_bin, pk_err, n_modes
+
+
 
 # SECTION 3 : ANALYSIS PIPELINE
 
@@ -766,560 +850,627 @@ st.download_button(
     mime="application/octet-stream",
 
     key="download_spectra_dictionary")
-"""
-
-#-----section 4.2: Loop Through Spectra
-for spec in spectra:
-    with st.expander(f"{spec['object']} ({spec['instrument']})",expanded=False):
-    
-        #-----section 4.2.1: Extract Stored Data
-        flux = spec["flux"]
-        error = spec["error"]
-        wave = spec["wave"]
-        snr = spec["snr"]
-        ps_fft = spec["ps_fft"]
-        ps_lomb = spec["ps_lomb"]
-        if ps_lomb is not None:
-            window_pixels = spec["window_pixels"]
-            window_cMpc = spec["window_cMpc"]
-            
-        #-----section 4.2.2: Basic Statistics:
-        finite_pixels = int(np.sum(np.isfinite(flux)))
-        masked_pixels = int(np.sum(~np.isfinite(flux)))
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Median S/N",f"{spec['median_snr']:.3e}")
-        c2.metric("Quality",quality_label(spec["median_snr"]))
-        c3.metric("Masked %",f"{spec['masked_fraction']:.3e}")
-        c4.metric("Velocity Spacing",f"{spec['dv']:.3e}")
-        c5.metric("Redshift",f"{spec['z']:.3e}")
-        
-        st.write(f"Pixels: {len(flux)}")
-        st.write(f"Finite Pixels: {finite_pixels}")
-        st.write(f"Masked Pixels: {masked_pixels}")
-        st.write(f"Wavelength Range: {wave.min():.1f} – {wave.max():.1f} Å")
-
-        #-----section 4.2.3: Lyα Forest Diagnostics
-        
-        if (ps_lomb is not None):
-            col1, col2 = st.columns(2)
-            st.markdown("### Using Lomb-Scargle Periodogram")
-
-            with col1:
-                st.metric("Good Pixels",ps_lomb["n_good"])
-                st.metric("Forest dv",f"{ps_lomb['dv_forest']:.2f}")
-                st.metric("Segment Length", f"{spec['segment_length']:.1f} h⁻¹ cMpc")
-                
-
-            with col2:
-                st.write("")
-                st.metric("Segments", len(ps_lomb["segment_ps"]))
-                st.metric("Total Modes",int(np.sum(ps_lomb["n_modes"])))
-                st.metric("Mean Modes / Bin",f"{np.mean(ps_lomb['n_modes']):.1f}")
 
 
-            st.dataframe(pd.DataFrame({
-                "log10(k)": np.log10(ps_lomb["k_bin"]),
-                "Modes": ps_lomb["n_modes"]}))
-            
-        #-----section 4.2.4: Lyα Power Spectrum Plot
-        if ps_lomb is not None :
-
-            # ----- Step 1: Observed Spectrum -----
-            with st.expander("1. Observed Spectrum", expanded=False):
-
-                fig_obs = go.Figure()
-
-                fig_obs.add_trace(go.Scatter(
-                        x=wave,
-                        y=flux,
-                        mode="lines",
-                        name="Observed Flux",
-                        error_y=dict(type="data",array=error,visible=True)))
-
-                fig_obs.update_layout(
-                    title="Observed Spectrum from FITS",
-                    xaxis_title="Wavelength (Å)",
-                    yaxis_title="Flux",
-                    hovermode="x unified")
-
-                st.plotly_chart(fig_obs,width="stretch",config=plotly_download_config(spec["object"],"Step_1_Observed_Spectrum"))
 
 
-            # ----- Step 2: Lyα Forest + Rolling Mean -----
-            with st.expander("2. Lyα Forest and Rolling Mean", expanded=False):
-
-                wave_lya = ps_lomb["wave_obs"]
-                flux_lya = ps_lomb["flux_forest"]
-                smooth_lya = ps_lomb["smooth"]
-
-                fig_lya = go.Figure()
-
-                # Observed flux in Lyα forest
-                fig_lya.add_trace(
-                    go.Scatter(
-                        x=wave_lya,
-                        y=flux_lya,
-                        mode="lines",
-                        name="Observed Flux",
-                        line=dict(width=1)))
-
-                # Rolling mean
-                fig_lya.add_trace(
-                    go.Scatter(
-                        x=wave_lya,
-                        y=smooth_lya,
-                        mode="lines",
-                        name=f"Rolling Mean ({window_cMpc:.0f} $h^{{-1}}$ cMpc)",
-                        line=dict(width=2)))
-
-                fig_lya.update_layout(
-                    title="Lyα Forest and Rolling Mean",
-                    xaxis_title="Observed Wavelength (Å)",
-                    yaxis_title="Flux",
-                    hovermode="x unified")
-
-                st.plotly_chart(
-                    fig_lya,
-                    width="stretch",
-                    config=plotly_download_config(
-                        spec["object"],
-                        "Step_2_Lya_Forest_Rolling_Mean"))
 
 
-            # ============================================================
-            # STEP 3 : FLUX CONTRAST
-            # ============================================================
-
-            with st.expander("3. Flux Contrast", expanded=False):
-
-                wave_lya = ps_lomb["wave_obs"]
-                deltaF = ps_lomb["deltaF"]
-                chi_lya = ps_lomb["chi_forest"]
-
-                # Shift the comoving coordinate so the forest starts at 0
-                chi_relative = chi_lya - chi_lya[0]
-
-                fig_deltaF = go.Figure()
-
-                fig_deltaF.add_trace(go.Scatter(
-                        x=chi_relative,
-                        y=deltaF,
-                        mode="lines",
-                        name="Flux Contrast",
-                        line=dict(width=1)))
-
-                # Reference line: deltaF = 0
-                fig_deltaF.add_hline(
-                    y=0,
-                    line_dash="dash",
-                    line_width=1)
-
-                fig_deltaF.update_layout(
-                    title="Flux Contrast in the Lyα Forest",
-                    xaxis_title="Comoving Distance ($h^{-1}$ cMpc)",
-                    yaxis_title=r"$\delta_F$",
-                    hovermode="x unified")
-
-                st.plotly_chart(fig_deltaF,width="stretch",config=plotly_download_config(spec["object"],"Step_3_Flux_Contrast"))
+#________________________
+#________________________
+#________________________
+#________________________
 
 
-            # ============================================================
-            # STEP 4 : LOMB-SCARGLE POWER SPECTRUM
-            # ============================================================
+# SECTION 4 : RESULTS AND VISUALISATION
 
-            with st.expander("4. Noise Corrected Lomb–Scargle Power Spectrum", expanded=False):
+#-----section 4.0: Setup-------------------------
+st.title("Power spectrum")
 
-                segment_ps = ps_lomb["segment_ps"]
+#-----section 4.1: combined result-------------------------
 
-                fig_ls = go.Figure()
+fig = go.Figure()
 
-                # --------------------------------------------------------
-                # Individual segment spectra
-                # --------------------------------------------------------
-                for i, seg in enumerate(segment_ps):
+for (zmin, zmax), result in redshift_results.items():
+    valid = (np.isfinite(result["pk_bin"]) & (result["pk_bin"] > 0))
+    fig.add_trace(go.Scatter(
+            x=np.log10(result["k_bin"][valid]),
+            y=np.log10(result["k_bin"][valid] * result["pk_bin"][valid]/ np.pi),
+            mode="markers+lines",
+            name=f"{zmin:.1f} ≤ z < {zmax:.1f}",
 
-                    k = seg["k_bin"]
-                    pk = seg["pk_bin"]
-
-                    valid = (np.isfinite(k)
-                        & np.isfinite(pk)
-                        & (k > 0)
-                        & (pk > 0))
-
-                    log_k = np.log10(k[valid])
-                    log_kP = np.log10(k[valid] * pk[valid] / np.pi)
-
-                    fig_ls.add_trace(
-                        go.Scatter(
-                            x=log_k,
-                            y=log_kP,
-                            mode="lines",
-                            name=f"Segment {i+1}",
-                            line=dict(width=1),
-                            opacity=0.4,
-                            showlegend=False))
-
-                # --------------------------------------------------------
-                # Averaged spectrum
-                # --------------------------------------------------------
-                k_avg = ps_lomb["k_bin"]
-                pk_avg = ps_lomb["pk_bin"]
-
-                valid_avg = (
-                    np.isfinite(k_avg)
-                    & np.isfinite(pk_avg)
-                    & (k_avg > 0)
-                    & (pk_avg > 0))
-
-                log_k_avg = np.log10(k_avg[valid_avg])
-                log_kP_avg = np.log10(k_avg[valid_avg] * pk_avg[valid_avg] / np.pi)
-
-                fig_ls.add_trace(
-                    go.Scatter(
-                        x=log_k_avg,
-                        y=log_kP_avg,
-                        mode="lines+markers",
-                        name="Average",
-                        line=dict(width=3),
-                        marker=dict(size=6)))
-
-                fig_ls.update_layout(
-                    title="Lomb–Scargle Flux Power Spectrum",
-                    xaxis_title=r"$\log_{10}(k/\mathrm{km}^{-1}\,\mathrm{s})$",
-                    yaxis_title=r"$\log_{10}[kP(k)/\pi]$",
-                    hovermode="x unified")
-
-                st.plotly_chart(
-                    fig_ls,
-                    width="stretch",
-                    config=plotly_download_config(
-                        spec["object"],
-                        "Step_4_Lomb_Scargle_Power_Spectrum"))
-
-            with st.expander("5. Noise Power Spectrum", expanded=False):
-
-                k_noise = ps_lomb["k"]
-                pk_noise = ps_lomb["noise_pk"]
-
-                valid_noise = (
-                    np.isfinite(k_noise)
-                    & np.isfinite(pk_noise)
-                    & (k_noise > 0)
-                    & (pk_noise > 0)
-                )
-
-                fig_noise = go.Figure()
-
-                fig_noise.add_trace(go.Scatter(
-                    x=np.log10(k_noise[valid_noise]),
-                    y=np.log10(
-                        k_noise[valid_noise]
-                        * pk_noise[valid_noise]
-                        / np.pi
-                    ),
-                    mode="lines",
-                    name="Noise Power",
-                    line=dict(width=2)
-                ))
-
-                fig_noise.update_layout(
-                    title="Estimated Noise Power Spectrum",
-                    xaxis_title=r"$\log_{10}(k/\mathrm{km}^{-1}\,\mathrm{s})$",
-                    yaxis_title=r"$\log_{10}[kP_N(k)/\pi]$",
-                    hovermode="x unified"
-                )
-
-                st.plotly_chart(
-                    fig_noise,
-                    width="stretch",
-                    config=plotly_download_config(
-                        spec["object"],
-                        "Step_5_Noise_Power_Spectrum"
-                    )
-                )
+            error_y=dict(type="data",array=(result["pk_err"][valid] / (result["pk_bin"][valid]* np.log(10))),visible=True,),))
 
 
-            with st.expander("6. Final Noise-Corrected Power Spectrum", expanded=False):
 
-                k_final = ps_lomb["k_bin"]
-                pk_final = ps_lomb["pk_bin"]
-                pk_err = ps_lomb["pk_err"]
 
-                valid_final = (
-                    np.isfinite(k_final)
-                    & np.isfinite(pk_final)
-                    & (k_final > 0)
-                    & (pk_final > 0)
-                )
 
-                log_k = np.log10(k_final[valid_final])
-                log_kP = np.log10(
-                    k_final[valid_final]
-                    * pk_final[valid_final]
-                    / np.pi
-                )
 
-                # Convert linear P(k) error to log10[kP/pi] error
-                valid_err = (
-                    valid_final
-                    & np.isfinite(pk_err)
-                    & (pk_err >= 0)
-                )
+labels = [
+    f"{i}: {spec['object']} (z = {spec['z']})"
+    for i, spec in enumerate(spectra)
+]
 
-                log_err = (
-                    pk_err[valid_err]
-                    / pk_final[valid_err]
-                    / np.log(10)
-                )
+selected_label = st.selectbox("Select a quasar", labels)
 
-                fig_final = go.Figure()
+st.header(f"Plots for {selected_label}")
+selected_index = labels.index(selected_label)
+spec = spectra[selected_index]
 
-                fig_final.add_trace(go.Scatter(
+#-----section 4.2.1: Extract Stored Data
+flux = spec["flux"]
+error = spec["error"]
+wave = spec["wave"]
+snr = spec["snr"]
+ps_fft = spec["ps_fft"]
+
+window_cMpc = spec.get("window_cMpc", window_cMpc if "window_cMpc" in locals() else 40.0)
+ps_lomb = lya_power_spectrum_lomb(wave, flux, error, spec["z"], window_cMpc, segment_length)
+
+if ps_lomb is not None:
+    window_pixels = spec.get("window_pixels", np.nan)
+
+with st.expander("Graph 1A:noise subtraction (bin orignal)",expanded=False):
+    k = np.asarray(ps_lomb["k"], dtype=float)
+    pk_raw = np.asarray(ps_lomb["pk"], dtype=float)
+    pk_noise = np.asarray(ps_lomb["noise_pk"], dtype=float)
+    P_noise = float(np.nanmedian(pk_noise))
+
+
+    st.write("### Noise Subtraction Diagnostics")
+
+    # Retrieve the actual arrays from ps_lomb
+    k = ps_lomb["k"]
+    pk_original = ps_lomb["pk"]
+    pk_corrected = ps_lomb["pk_corrected"]
+    noise_pk = ps_lomb["noise_pk"]
+
+    st.write("Raw k range:", float(np.nanmin(k)), float(np.nanmax(k)))
+    st.write("Total raw k points:", len(k))
+
+    original_valid = ()
+    corrected_valid = ()
+
+    # Use the diagnostic bins already calculated in the pipeline
+    k_bin = np.asarray(ps_lomb["k_debug_bin"], dtype=float)
+    pk_raw_bin = np.asarray(ps_lomb["pk_raw_bin"], dtype=float)
+    pk_noise_bin = np.asarray(ps_lomb["pk_noise_bin"], dtype=float)
+    pk_corrected_bin = np.asarray(ps_lomb["pk_sub_bin"], dtype=float)
+    # Keep only positive powers for the logarithmic y-axis.
+    raw_ok = (k_bin > 0) & (pk_raw_bin > 0)
+    corrected_ok = (k_bin > 0) & (pk_corrected_bin > 0)
+
+    logk_raw = np.log10(k_bin[raw_ok])
+    logk_corrected = np.log10(k_bin[corrected_ok])
+
+    fig_noise_subtraction = go.Figure()
+
+    # Original binned power: black
+    fig_noise_subtraction.add_trace(go.Scatter(
+        x=logk_raw,
+        y=np.log10(pk_raw_bin[raw_ok]),
+        mode="lines",
+        name="Original",
+        line=dict(color="black", width=2)))
+
+    # Corrected binned power: green
+    fig_noise_subtraction.add_trace(go.Scatter(
+        x=logk_corrected,
+        y=np.log10(pk_corrected_bin[corrected_ok]),
+        mode="lines",
+        name="Corrected",
+        line=dict(color="green", width=2)))
+
+    # Constant noise level: red dashed
+    fig_noise_subtraction.add_hline(
+        y=np.log10(P_noise),
+        line_color="red",
+        line_width=2,
+        line_dash="dash",
+        annotation_text="",)
+
+    # Add a legend entry for the horizontal noise line.
+    fig_noise_subtraction.add_trace(go.Scatter(
+        x=[None],
+        y=[None],
+        mode="lines",
+        name="Noise level",
+        line=dict(color="red", width=2, dash="dash")))
+
+    fig_noise_subtraction.update_layout(
+        title="Noise subtraction ",
+        xaxis_title="log₁₀(k / km⁻¹ s)",
+        yaxis_title="log₁₀(P(k))",
+        hovermode="x unified",)
+
+    st.plotly_chart(fig_noise_subtraction,width="stretch",config=plotly_download_config(spec["object"],"Boera_Figure5_Noise_Subtraction"))
+
+
+
+
+with st.expander("Graph 1B: Noise subtraction (binned extended)", expanded=True):
+
+
+    # Use precomputed values from spectra.pkl
+    k = np.asarray(ps_lomb["k"], dtype=float)
+    pk_original = np.asarray(ps_lomb["pk"], dtype=float)
+    pk_corrected = np.asarray(ps_lomb["pk_corrected"], dtype=float)
+    noise_pk = np.asarray(ps_lomb["noise_pk"], dtype=float)
+
+    # --------------------------------------------------
+    # 1. Select valid original power and noise values
+    # --------------------------------------------------
+    valid_raw = (
+        np.isfinite(k) &
+        (k > 0) &
+        np.isfinite(pk_original) &
+        (pk_original > 0)
+    )
+
+    logk_raw = np.log10(k[valid_raw])
+    pk_raw = pk_original[valid_raw]
+
+    valid_noise = np.isfinite(noise_pk) & (noise_pk > 0)
+
+    if not np.any(valid_noise):
+        st.warning("No valid stored noise estimates are available.")
+    else:
+        P_noise = float(np.median(noise_pk[valid_noise]))
+
+        # --------------------------------------------------
+        # 2. Common bin edges, extending to high k
+        # --------------------------------------------------
+        bin_edges = np.arange(-2.25, 0.151, 0.1)
+
+        bin_centres = []
+        bin_original = []
+        bin_corrected = []
+
+        for left, right in zip(bin_edges[:-1], bin_edges[1:]):
+            mask = (
+                (logk_raw >= left) &
+                (logk_raw < right)
+            )
+
+            if not np.any(mask):
+                continue
+
+            # Arithmetic mean in LINEAR power units
+            P_original_bin = np.mean(pk_raw[mask])
+
+            # Subtract noise in linear units
+            P_corrected_bin = P_original_bin - P_noise
+
+            bin_centres.append(0.5 * (left + right))
+            bin_original.append(P_original_bin)
+            bin_corrected.append(P_corrected_bin)
+
+        bin_centres = np.asarray(bin_centres)
+        bin_original = np.asarray(bin_original)
+        bin_corrected = np.asarray(bin_corrected)
+
+        # --------------------------------------------------
+        # 3. Plot both spectra using identical bins
+        # --------------------------------------------------
+        fig_noise_subtraction = go.Figure()
+
+        # Original spectrum
+        positive_original = bin_original > 0
+
+        fig_noise_subtraction.add_trace(go.Scatter(
+            x=bin_centres[positive_original],
+            y=np.log10(bin_original[positive_original]),
+            mode="lines+markers",
+            name="Original P(k)",
+            line=dict(color="black", width=1.5),
+            marker=dict(size=5)
+        ))
+
+        # Noise-subtracted spectrum.
+        # Non-positive values cannot be shown on a log scale.
+        positive_corrected = bin_corrected > 0
+
+        fig_noise_subtraction.add_trace(go.Scatter(
+            x=bin_centres[positive_corrected],
+            y=np.log10(bin_corrected[positive_corrected]),
+            mode="lines+markers",
+            name="Noise-subtracted P(k)",
+            line=dict(color="green", width=1.5),
+            marker=dict(size=5)
+        ))
+
+        # Constant stored noise level
+        fig_noise_subtraction.add_hline(
+            y=np.log10(P_noise),
+            line_color="red",
+            line_width=2,
+            line_dash="dash",
+            annotation_text="Noise level",
+            annotation_position="top left"
+        )
+
+        # --------------------------------------------------
+        # 4. Format the graph
+        # --------------------------------------------------
+        fig_noise_subtraction.update_layout(
+            title="Original Power Spectrum and Noise Subtraction",
+            xaxis_title="log₁₀(k / km⁻¹ s)",
+            yaxis_title="log₁₀(P(k))",
+            hovermode="x unified",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0
+            )
+        )
+
+        fig_noise_subtraction.update_xaxes(
+            range=[-2.25, 0.15]
+        )
+
+        st.plotly_chart(
+            fig_noise_subtraction,
+            width="stretch",
+            config=plotly_download_config(
+                spec["object"],
+                "Boera_Figure5_Noise_Subtraction"
+            )
+        )
+
+
+
+
+
+
+with st.expander("Graph 2: Flux vs wavelength with rolling mean",expanded=True):
+    ps_lomb = spec["ps_lomb"]
+
+    # Observed-frame Lyα forest data and stored rolling mean
+    wave = np.asarray(ps_lomb["wave_obs"], dtype=float)
+    flux = np.asarray(ps_lomb["flux_forest"], dtype=float)
+    rolling_mean = np.asarray(ps_lomb["smooth"], dtype=float)
+
+    fig_flux = go.Figure()
+
+    fig_flux.add_trace(go.Scatter(
+        x=wave,
+        y=flux,
+        mode="lines",
+        name="Flux",
+        line=dict(color="black", width=1)))
+
+    fig_flux.add_trace(go.Scatter(
+        x=wave,
+        y=rolling_mean,
+        mode="lines",
+        name="Rolling mean (40 h⁻¹ cMpc)",
+        line=dict(color="red", width=2)))
+
+    fig_flux.update_layout(
+        title="Lyα Forest Flux and Rolling Mean",
+        xaxis=dict(
+            title="Observed wavelength (Å)",
+            type="log"),
+        yaxis_title="Flux",
+        hovermode="x unified")
+
+    st.plotly_chart(fig_flux,
+        width="stretch",
+        config=plotly_download_config(
+            spec["object"],
+            "Flux_vs_Wavelength_Rolling_Mean"))
+
+
+
+
+
+
+
+
+
+with st.expander("Graph 3: Power Spectrum by Segment",expanded=True):
+    segment_ps = ps_lomb["segment_ps"]
+
+    if len(segment_ps) == 0:
+        st.info("No segments available for this quasar.")
+
+    else:
+        n_segments = len(segment_ps)
+        ncols = 3
+        nrows = (n_segments + ncols - 1) // ncols
+
+        fig_segments = make_subplots(
+            rows=nrows,
+            cols=ncols,
+            subplot_titles=[
+                f"Segment {i + 1}"
+                for i in range(n_segments)
+            ],
+            horizontal_spacing=0.08,
+            vertical_spacing=0.12
+        )
+
+        for i, seg in enumerate(segment_ps):
+            row = i // ncols + 1
+            col = i % ncols + 1
+
+            k = np.asarray(seg["k_bin"], dtype=float)
+            pk = np.asarray(seg["pk_bin"], dtype=float)
+
+            valid = (
+                np.isfinite(k)
+                & np.isfinite(pk)
+                & (k > 0)
+                & (pk > 0)
+            )
+
+            log_k = np.log10(k[valid])
+            log_kP = np.log10(k[valid] * pk[valid] / np.pi)
+
+            fig_segments.add_trace(
+                go.Scatter(
                     x=log_k,
                     y=log_kP,
                     mode="lines+markers",
-                    name="Noise-corrected power",
-                    error_y=dict(
-                        type="data",
-                        array=log_err,
-                        visible=True
-                    ),
-                    line=dict(width=3),
-                    marker=dict(size=6)
-                ))
+                    name=f"Segment {i + 1}",
+                    marker=dict(size=4),
+                    line=dict(width=1.5),
+                    showlegend=False
+                ),
+                row=row,
+                col=col
+            )
 
-                fig_final.update_layout(
-                    title="Final Noise-Corrected Lomb–Scargle Power Spectrum",
-                    xaxis_title=r"$\log_{10}(k/\mathrm{km}^{-1}\,\mathrm{s})$",
-                    yaxis_title=r"$\log_{10}[kP(k)/\pi]$",
-                    hovermode="x unified"
-                )
+        fig_segments.update_xaxes(title_text="log₁₀(k / (km⁻¹ s))",matches="x")
 
-                st.plotly_chart(
-                    fig_final,
-                    width="stretch",
-                    config=plotly_download_config(
-                        spec["object"],
-                        "Step_6_Final_Power_Spectrum"
-                    )
-                )
+        fig_segments.update_yaxes(title_text="log₁₀[kP(k) / π]",matches="y")
 
+        fig_segments.update_layout(
+            title=f"{spec['object']}: Power Spectrum by Segment",
+            height=300 * nrows,
+            showlegend=False,
+            hovermode="closest"
+        )
 
-
-
-
+        st.plotly_chart(
+            fig_segments,
+            width="stretch",
+            config=plotly_download_config(
+                spec["object"],
+                "Lomb_Scargle_Power_Spectrum_By_Segment"
+            )
+        )
 
 
+# ============================================================
+# OVERALL POWER SPECTRUM FOR THIS QUASAR
+# ============================================================
+
+with st.expander(" Quasar Power Spectrum",expanded=True):
+    k_avg = np.asarray(ps_lomb["k_bin"], dtype=float)
+    pk_avg = np.asarray(ps_lomb["pk_bin"], dtype=float)
+    pk_err = np.asarray(ps_lomb["pk_err"], dtype=float)
+
+    valid = (
+        np.isfinite(k_avg)
+        & np.isfinite(pk_avg)
+        & (k_avg > 0)
+        & (pk_avg > 0)
+    )
+
+    fig_overall = go.Figure()
+
+    fig_overall.add_trace(
+        go.Scatter(
+            x=np.log10(k_avg[valid]),
+            y=np.log10(k_avg[valid] * pk_avg[valid] / np.pi),
+            error_y=dict(
+                type="data",
+                array=(
+                    pk_err[valid]
+                    / (pk_avg[valid] * np.log(10))
+                ),
+                visible=True
+            ),
+            mode="lines+markers",
+            name="Overall spectrum",
+            line=dict(color="black", width=2),
+            marker=dict(size=6)
+        )
+    )
+
+    fig_overall.update_layout(
+        title=f"{spec['object']}: Overall Lyα Flux Power Spectrum",
+        xaxis_title="log₁₀(k / (km⁻¹ s))",
+        yaxis_title="log₁₀[kP(k) / π]",
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(
+        fig_overall,
+        width="stretch",
+        config=plotly_download_config(
+            spec["object"],
+            "Overall_Quasar_Power_Spectrum"
+        )
+    )
 
 
-
-
-
-#-----section 4.2.4: Rolling Mean Normalization
-        if ps_lomb is not None:
-
-            with st.expander("1. Rolling Mean Normalization",expanded=True):
-
-
-                fig_roll = go.Figure()
-
-                fig_roll.add_trace(
-                    go.Scatter(
-                        x=ps_lomb["wave_rest"],
-                        y=ps_lomb["flux_forest"],
-                        mode="lines",
-                        name="Forest Flux"))
-
-                fig_roll.add_trace(
-                    go.Scatter(
-                        x=ps_lomb["wave_rest"],
-                        y=ps_lomb["smooth"],
-                        mode="lines",
-                        name=f"Rolling Mean ({window_pixels} px)"))
-
-                fig_roll.update_layout(
-                    title=(
-                        f"Lyα Forest Flux and Rolling Mean "
-                        f"(Window = {window_cMpc:.1f} h⁻¹ cMpc)"),
-                    xaxis_title="Rest Wavelength (Å)",
-                    yaxis_title="Flux")
-
-                st.plotly_chart(
-                    fig_roll,
-                    width="stretch",
-                    config=plotly_download_config(spec["object"],"RollingMeanNormalization"))
-
-                st.markdown("#### Flux Contrast")
-
-                fig_delta = go.Figure()
-
-                fig_delta.add_trace(
-                    go.Scatter(
-                        x=ps_lomb["wave_rest"],
-                        y=ps_lomb["deltaF"],
-                        mode="lines",
-                        name="δF"
-                    )
-                )
-
-                fig_delta.add_hline(
-                    y=0,
-                    line_dash="dash",
-                    annotation_text="δF = 0"
-                )
-
-                fig_delta.update_layout(
-                    title="Rolling-Mean Normalized Flux Contrast",
-                    xaxis_title="Rest Wavelength (Å)",
-                    yaxis_title="δF")
-
-                st.plotly_chart(
-                    fig_delta,
-                    width="stretch",
-                    config=plotly_download_config(spec["object"],"FluxContrast"))
+#---------------------------------
 
 
 
-       
+# Collect segments and preserve their parent quasar names
+
+all_segments = []
+
+for spec in spectra:
+    if spec["ps_lomb"] is None:
+        continue
+
+    for i, seg in enumerate(spec["ps_lomb"]["segment_ps"]):
+        segment = seg.copy()
+        segment["quasar"] = spec["object"]
+        segment["segment_number"] = i + 1
+        all_segments.append(segment)
+
+REDSHIFT_BINS = [
+    (4.0, 4.4),
+    (4.4, 4.8),
+    (4.8, 5.2),
+]
+
+grouped_segments = group_segments_by_redshift(
+    all_segments, REDSHIFT_BINS
+)
+
+redshift_results = {}
+
+for zbin, segments in grouped_segments.items():
+    if len(segments) == 0:
+        continue
+
+    redshift_results[zbin] = average_segment_power_spectra(
+        segments
+    )
 
 
-            #B) Binned Power Spectra
-            with st.expander("B) Binned Power Spectra", expanded=True):
-                if showfft==True: 
-                    # FFT
-                    fig_fft_bin = go.Figure()
+# ============================================================
+# PLOT 1: FINAL POWER SPECTRUM FOR EACH REDSHIFT BIN
+# ============================================================
 
-                    fig_fft_bin.add_trace(go.Scatter(
-                        x=np.log10(ps_fft["k_bin"]),
-                        y=np.log10(ps_fft["k_bin"] * ps_fft["pk_bin"] / np.pi),
-                        mode="markers+lines",
-                        error_y=dict(type="data",array=ps_fft["pk_err"] / (ps_fft["pk_bin"] * np.log(10)),
-                            visible=True),name="FFT Binned"))
+st.header("Final Power Spectrum by Redshift")
 
-                    fig_fft_bin.update_layout(title="FFT Binned Power Spectrum",
-                        xaxis_title="log₁₀(k / km⁻¹ s)",
-                        yaxis_title="log₁₀(kP(k)/π)")
+fig_final = go.Figure()
 
-                    st.plotly_chart(fig_fft_bin,width='stretch',
-                        config=plotly_download_config(spec["object"],"FFT_Binned_PowerSpectrum"))
+for (zmin, zmax), result in redshift_results.items():
+    k = result["k_bin"]
+    pk = result["pk_bin"]
+    err = result["pk_err"]
 
-                # ==========================
-                # Lomb-Scargle Binned Power Spectrum
-                # ==========================
+    valid = (
+        np.isfinite(k)
+        & np.isfinite(pk)
+        & (k > 0)
+        & (pk > 0)
+    )
 
-                fig_lomb_bin = go.Figure()
+    # Convert the uncertainty in P to uncertainty in log10(kP/pi)
+    valid_err = np.where(
+        np.isfinite(err[valid]) & (err[valid] >= 0),
+        err[valid] / (pk[valid] * np.log(10)),
+        np.nan,
+    )
 
-                # Masks
-                valid = np.isfinite(ps_lomb["pk_bin"])
-                empty = ~valid
+    fig_final.add_trace(go.Scatter(
+        x=np.log10(k[valid]),
+        y=np.log10(k[valid] * pk[valid] / np.pi),
+        mode="lines+markers",
+        name=f"{zmin:.1f} ≤ z < {zmax:.1f}",
+        error_y=dict(
+            type="data",
+            array=valid_err,
+            visible=True,
+        ),
+    ))
 
-                # --------------------------
-                # 1. Line trace (contains NaNs -> gaps remain)
-                # --------------------------
-                fig_lomb_bin.add_trace(
-                    go.Scatter(
-                        x=np.log10(ps_lomb["k_bin"]),
-                        y=np.log10(ps_lomb["k_bin"] * ps_lomb["pk_bin"] / np.pi),
-                        mode="lines",
-                        line=dict(color="royalblue"),
-                        hoverinfo="skip",
-                        showlegend=False))
+fig_final.update_layout(
+    title="Mean Lyα Forest Power Spectrum",
+    xaxis_title="log₁₀(k / (km⁻¹ s))",
+    yaxis_title="log₁₀[kP(k) / π]",
+    legend_title="Redshift bin",
+)
 
-                # --------------------------
-                # 2. Measured points
-                # --------------------------
-                fig_lomb_bin.add_trace(
-                    go.Scatter(
-                        x=np.log10(ps_lomb["k_bin"][valid]),
-                        y=np.log10(
-                            ps_lomb["k_bin"][valid]* ps_lomb["pk_bin"][valid]/ np.pi),
-                        mode="markers+text",
-                        marker=dict(size=8,color="royalblue"),
-                        text=[f"n={int(n)}" for n in ps_lomb["n_modes"][valid]],
-                        textposition="top center",
-                        textfont=dict(size=10),
-                        error_y=dict(
-                            type="data",
-                            array=(ps_lomb["pk_err"][valid]/ (ps_lomb["pk_bin"][valid] * np.log(10))),
-                            visible=True),name="Lomb Binned"))
-
-                # --------------------------
-                # 3. Empty bins (n = 0)
-                # --------------------------
-                y_cross = (np.nanmin(np.log10(ps_lomb["k_bin"][valid]* ps_lomb["pk_bin"][valid]/ np.pi)) - 0.15)
-
-                fig_lomb_bin.add_trace(go.Scatter(
-                        x=np.log10(ps_lomb["k_bin"][empty]),
-                        y=np.full(np.sum(empty), y_cross),
-                        mode="markers+text",
-                        marker=dict(
-                            symbol="x",
-                            size=12,
-                            color="gray",
-                            line=dict(width=2)),
-                        text=["n=0"] * np.sum(empty),
-                        textposition="top center",
-                        textfont=dict(size=10,color="gray"),
-                        hovertemplate="No modes in this logarithmic k-bin<extra></extra>",
-                        showlegend=False))
-
-                fig_lomb_bin.update_layout(title=f"Lomb-Scargle Binned Power Spectrum (Window={window_pixels} px, Bins=20)",
-                    xaxis_title="log₁₀(k / km⁻¹ s)",
-                    yaxis_title="log₁₀(kP(k)/π)")
-
-                st.plotly_chart(fig_lomb_bin,width='stretch',config=plotly_download_config(spec["object"],"LombScargle_binned_PowerSpectrum"))
-
-                
-            
-
-            # D) Large-scale Power Stability Test
-            with st.expander("D) Large-scale Power Stability Test"):
-
-                wave2, flux2, error2 = rebin_spectrum(wave,flux,error,factor=2)
-                ps_lomb2 = lya_power_spectrum_lomb(wave2,flux2,error2,
-                    spec["z"],spec["window_cMpc"],segment_length)
-                fig = go.Figure()
-
-           
-
-                # Lomb Rebinned
-                fig.add_trace(go.Scatter(
-                    x=np.log10(ps_lomb2["k_bin"]),
-                    y=np.log10(ps_lomb2["k_bin"] * ps_lomb2["pk_bin"] / np.pi),
-                    mode="lines",name="Lomb (Rebinned)"))
-
-                # Lomb Original
-                fig.add_trace(go.Scatter(
-                    x=np.log10(ps_lomb["k_bin"]),
-                    y=np.log10(ps_lomb["k_bin"] * ps_lomb["pk_bin"] / np.pi),
-                    mode="lines",name="Lomb (Original)",
-                    line=dict(dash="dot")))
-
-                fig.update_layout(title="Large-scale Power Stability after Pixel Rebinning",
-                    xaxis_title="log₁₀(k / km⁻¹ s)",
-                    yaxis_title="log₁₀(kP(k)/π)")
-
-                st.plotly_chart(fig,width='stretch',config=plotly_download_config(spec["object"],"LargeScalePowerStability"))
+st.plotly_chart(fig_final, width="stretch")
 
 
+# ============================================================
+# PLOT 2: INDIVIDUAL SEGMENT CONTRIBUTIONS BY REDSHIFT
+# ============================================================
 
-        #-----section 4.2.7:Signal-to-Noise Plot
-        with st.expander("Signal to Noise Ratio",expanded=False):
-            smask = np.isfinite(snr)
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(x=wave[smask],y=snr[smask],mode="lines",name="SNR"))
+st.header("Segment Contributions to Each Redshift Bin")
 
-            fig2.update_layout(title="Signal-to-Noise Ratio",
-                xaxis_title="Observed Wavelength (Å)",
-                yaxis_title="S/N")
-            st.plotly_chart(fig2,width='stretch')
-        
-        #-----section 4.2.8:Text Analysis
-        st.write(f"This {spec['instrument']} spectrum contains {len(flux):,} pixels. The median S/N is {spec['median_snr']:.2f}, which corresponds to {quality_label(spec['median_snr'])} data quality. The masked fraction is {spec['masked_fraction']:.2f}% and the velocity spacing is {spec['dv']:.2f} km/s.")
-            
-        #-----section 4.2.9: FITS Header
-        with st.expander("FITS Header"):
-            st.json(dict(spec["header"]))
+for (zmin, zmax), segments in grouped_segments.items():
+
+    if len(segments) == 0:
+        st.info(f"No segments in {zmin:.1f} ≤ z < {zmax:.1f}")
+        continue
+
+    result = redshift_results[(zmin, zmax)]
+
+    fig_segments = go.Figure()
+
+    # Individual segment spectra
+    for seg in segments:
+        k = seg["k_bin"]
+        pk = seg["pk_bin"]
+
+        valid = (
+            np.isfinite(k)
+            & np.isfinite(pk)
+            & (k > 0)
+            & (pk > 0)
+        )
+
+        fig_segments.add_trace(go.Scatter(
+            x=np.log10(k[valid]),
+            y=np.log10(k[valid] * pk[valid] / np.pi),
+            mode="lines",
+            name=(
+                f"{seg['quasar']} — "
+                f"segment {seg['segment_number']}"
+            ),
+            line=dict(width=1),
+            opacity=0.35,
+            showlegend=True,
+        ))
+
+    # Final mean spectrum for this redshift bin
+    k = result["k_bin"]
+    pk = result["pk_bin"]
+    err = result["pk_err"]
+
+    valid = (
+        np.isfinite(k)
+        & np.isfinite(pk)
+        & (k > 0)
+        & (pk > 0)
+    )
+
+    mean_err = np.where(
+        np.isfinite(err[valid]) & (err[valid] >= 0),
+        err[valid] / (pk[valid] * np.log(10)),
+        np.nan,
+    )
+
+    fig_segments.add_trace(go.Scatter(
+        x=np.log10(k[valid]),
+        y=np.log10(k[valid] * pk[valid] / np.pi),
+        mode="lines+markers",
+        name="Redshift-bin mean",
+        line=dict(width=4, color="black"),
+        marker=dict(size=6, color="black"),
+        error_y=dict(
+            type="data",
+            array=mean_err,
+            visible=True,
+        ),
+    ))
+
+    fig_segments.update_layout(
+        title=(
+            f"Segment Contributions: "
+            f"{zmin:.1f} ≤ z < {zmax:.1f}"
+        ),
+        xaxis_title="log₁₀(k / (km⁻¹ s))",
+        yaxis_title="log₁₀[kP(k) / π]",
+        legend_title="Quasar and segment",
+        height=650,
+    )
+
+    st.plotly_chart(fig_segments, width="stretch")
 
 
-"""
+
